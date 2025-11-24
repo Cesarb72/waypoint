@@ -2,13 +2,14 @@
 
 import { useState } from "react";
 import { ENTITIES } from "@/data/entities";
-import Image from "next/image";
 
 export default function Home() {
   const [what, setWhat] = useState("");
   const [where, setWhere] = useState("");
   const [when, setWhen] = useState("");
   const [results, setResults] = useState(ENTITIES);
+  const [savedIds, setSavedIds] = useState<string[]>([]);
+  const [showSavedOnly, setShowSavedOnly] = useState(false);
 
   const handleSearch = () => {
     const queryWhat = what.trim().toLowerCase();
@@ -41,6 +42,7 @@ export default function Home() {
     }
 
     setResults(filtered);
+    // If we're in "saved only" mode, keep that, just filter from new results
   };
 
   const handleSurprise = () => {
@@ -52,9 +54,45 @@ export default function Home() {
     setResults([random]);
   };
 
+  const toggleSave = (id: string) => {
+    setSavedIds((prev) =>
+      prev.includes(id) ? prev.filter((savedId) => savedId !== id) : [...prev, id]
+    );
+  };
+
+  const handleAddToCalendar = (title: string) => {
+    alert(
+      `Got it. I’ll add "${title}" to your calendar in a future version of Waypoint.`
+    );
+  };
+
+  const handleShowDetails = (title: string) => {
+    alert(
+      `In the full version, this will open more details for "${title}".`
+    );
+  };
+
+  const displayedResults = showSavedOnly
+    ? results.filter((entity) => savedIds.includes(entity.id))
+    : results;
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
+      <main className="flex min-h-screen w-full max-w-3xl flex-col gap-10 py-16 px-6 bg-white dark:bg-black sm:px-10">
+        {/* Simple header / hero */}
+        <header className="w-full space-y-2">
+          <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">
+            Waypoint · Early prototype
+          </p>
+          <h1 className="text-3xl font-semibold tracking-tight text-black dark:text-zinc-50">
+            Find something to do, then actually make it happen.
+          </h1>
+          <p className="max-w-xl text-sm text-zinc-600 dark:text-zinc-400">
+            Search by what, where, and when. Filter your options or let the
+            assistant surprise you with a plan.
+          </p>
+        </header>
+
         {/* Search section */}
         <section className="w-full mb-8 space-y-4">
           <h2 className="text-xl font-semibold text-black dark:text-zinc-50">
@@ -125,109 +163,109 @@ export default function Home() {
         </section>
 
         {/* Results section */}
-        <section className="w-full mb-10 space-y-3">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Results
-          </h3>
+        <section className="w-full space-y-4">
+          <div className="flex items-baseline justify-between gap-2">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              Results
+            </h3>
+            <div className="flex items-center gap-3">
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-500">
+                {showSavedOnly
+                  ? `Showing ${displayedResults.length} saved ${
+                      displayedResults.length === 1 ? "item" : "items"
+                    }`
+                  : `Showing ${displayedResults.length} of ${ENTITIES.length} options`}
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowSavedOnly((prev) => !prev)}
+                className="text-[11px] font-medium text-zinc-700 underline-offset-2 hover:underline dark:text-zinc-200"
+              >
+                {showSavedOnly ? "Show all" : "View saved only"}
+              </button>
+            </div>
+          </div>
 
-          {results.length === 0 ? (
+          {displayedResults.length === 0 ? (
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              No matches yet. Try adjusting what, where, or when — or hit “Surprise
-              me.”
+              {showSavedOnly
+                ? "You haven’t saved anything yet. Try saving a few results first."
+                : "No matches yet. Try adjusting what, where, or when — or hit “Surprise me”."}
             </p>
           ) : (
-            <ul className="space-y-3">
-              {results.map((entity) => (
+            <ul className="grid gap-3 md:grid-cols-2">
+              {displayedResults.map((entity) => (
                 <li
                   key={entity.id}
-                  className="rounded-lg border border-zinc-200 bg-white p-3 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900"
+                  className="flex flex-col rounded-xl border border-zinc-200 bg-white p-3 text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-zinc-300 hover:shadow-md dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-500"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <p className="font-medium text-black dark:text-zinc-50">
-                        {entity.title}
-                      </p>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                        {entity.category} · {entity.location}
-                      </p>
-                    </div>
-                    {entity.cost && (
-                      <span className="rounded-full border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 dark:border-zinc-600 dark:text-zinc-200">
-                        {entity.cost}
-                      </span>
-                    )}
+                  {/* Category */}
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    {entity.category}
+                  </p>
+
+                  {/* Title */}
+                  <p className="mt-0.5 text-sm font-semibold text-black dark:text-zinc-50">
+                    {entity.title}
+                  </p>
+
+                  {/* Meta row */}
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-600 dark:text-zinc-300">
+                    {entity.location && <span>📍 {entity.location}</span>}
+                    {entity.timeLabel && <span>🕒 {entity.timeLabel}</span>}
+                    {entity.cost && <span>💸 {entity.cost}</span>}
                   </div>
-                  {entity.timeLabel && (
-                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                      When: {entity.timeLabel}
-                    </p>
-                  )}
+
+                  {/* Action row */}
+                  <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-600 dark:text-zinc-300">
+                    <button
+                      type="button"
+                      onClick={() => toggleSave(entity.id)}
+                      className="inline-flex items-center gap-1 rounded-full border border-zinc-200 px-2.5 py-1 text-xs font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                    >
+                      <span>{savedIds.includes(entity.id) ? "♥" : "♡"}</span>
+                      <span>
+                        {savedIds.includes(entity.id) ? "Saved" : "Save"}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleAddToCalendar(entity.title)}
+                      className="inline-flex items-center gap-1 rounded-full border border-zinc-200 px-2.5 py-1 text-xs font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                    >
+                      <span>🗓</span>
+                      <span>Add</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleShowDetails(entity.title)}
+                      className="inline-flex items-center gap-1 rounded-full border border-zinc-200 px-2.5 py-1 text-xs font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                    >
+                      <span>⋯</span>
+                      <span>Details</span>
+                    </button>
+                  </div>
+
+                  {/* Tags */}
                   {entity.tags && entity.tags.length > 0 && (
-                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                      Tags: {entity.tags.join(", ")}
-                    </p>
+                    <div className="mt-3 flex flex-wrap gap-1">
+                      {entity.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
                   )}
                 </li>
               ))}
             </ul>
           )}
         </section>
-
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/8 px-5 transition-colors hover:border-transparent hover:bg-black/4 dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
       </main>
     </div>
   );
