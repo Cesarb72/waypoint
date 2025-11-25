@@ -3,19 +3,50 @@
 import { useState } from "react";
 import { ENTITIES } from "@/data/entities";
 
+type BookedEvent = {
+  id: string;
+  title: string;
+  date: string;
+  time: string;
+};
+
+type EntityType = (typeof ENTITIES)[number];
+
+function buildShareMessage(entity: EntityType, notes?: string) {
+  const pieces = [
+    `Hey — want to check out "${entity.title}"?`,
+    entity.location ? `It’s in ${entity.location}.` : "",
+    entity.timeLabel ? `Timing: ${entity.timeLabel}.` : "",
+    notes ? `Plan: ${notes}` : "",
+    "",
+    "Planned with Waypoint (early prototype).",
+  ].filter(Boolean);
+
+  return pieces.join(" ");
+}
+
 export default function Home() {
   const [what, setWhat] = useState("");
   const [where, setWhere] = useState("");
   const [when, setWhen] = useState("");
+
   const [results, setResults] = useState(ENTITIES);
   const [savedIds, setSavedIds] = useState<string[]>([]);
+
   const [showSavedOnly, setShowSavedOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // NEW: calendar panel state
   const [calendarTarget, setCalendarTarget] = useState<string | null>(null);
   const [eventDate, setEventDate] = useState("");
   const [eventTime, setEventTime] = useState("");
+  const [bookedEvents, setBookedEvents] = useState<BookedEvent[]>([]);
+
+  const [shareTargetId, setShareTargetId] = useState<string | null>(null);
+  const [shareMessage, setShareMessage] = useState("");
+  const [shareCopied, setShareCopied] = useState(false);
+
+  // NEW: notes that belong to the current plan
+  const [planNotes, setPlanNotes] = useState("");
 
   const handleSearch = () => {
     const queryWhat = what.trim().toLowerCase();
@@ -65,10 +96,8 @@ export default function Home() {
     );
   };
 
-  // UPDATED: instead of alert, open the calendar panel for this id
   const handleAddToCalendar = (id: string) => {
     setCalendarTarget(id);
-    // reset draft date/time when opening
     setEventDate("");
     setEventTime("");
   };
@@ -86,7 +115,6 @@ export default function Home() {
       ? ENTITIES.find((entity) => entity.id === selectedId) ?? null
       : null;
 
-  // NEW: which entity the calendar panel is editing
   const calendarEntity =
     calendarTarget != null
       ? ENTITIES.find((entity) => entity.id === calendarTarget) ?? null
@@ -108,6 +136,44 @@ export default function Home() {
             assistant surprise you with a plan.
           </p>
         </header>
+
+        {/* Profile / account skeleton */}
+        <section className="w-full rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800 text-sm font-semibold text-white dark:bg-zinc-200 dark:text-zinc-900">
+                CB
+              </div>
+              <div>
+                <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  Your profile
+                </p>
+                <p className="text-sm font-semibold text-black dark:text-zinc-50">
+                  Cesar (demo account)
+                </p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-300">
+                  This MVP keeps everything on your device. Accounts and sign-in
+                  will come later.
+                </p>
+              </div>
+            </div>
+
+            <div className="text-right text-xs text-zinc-600 dark:text-zinc-300">
+              <p>
+                Saved plans:{" "}
+                <span className="font-semibold text-black dark:text-zinc-50">
+                  {savedIds.length}
+                </span>
+              </p>
+              <p>
+                Scheduled events:{" "}
+                <span className="font-semibold text-black dark:text-zinc-50">
+                  {bookedEvents.length}
+                </span>
+              </p>
+            </div>
+          </div>
+        </section>
 
         {/* Search section */}
         <section className="w-full mb-8 space-y-4">
@@ -234,9 +300,16 @@ export default function Home() {
 
                   {/* Action row */}
                   <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-600 dark:text-zinc-300">
+                    {/* PLAN button now wires selected plan + share builder */}
                     <button
                       type="button"
-                      onClick={() => setSelectedId(entity.id)}
+                      onClick={() => {
+                        setSelectedId(entity.id);
+                        const msg = buildShareMessage(entity, planNotes);
+                        setShareTargetId(entity.id);
+                        setShareMessage(msg);
+                        setShareCopied(false);
+                      }}
                       className="inline-flex items-center gap-1 rounded-full border border-zinc-200 px-2.5 py-1 text-xs font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
                     >
                       <span>🧭</span>
@@ -292,7 +365,7 @@ export default function Home() {
           )}
         </section>
 
-        {/* Selected plan panel */}
+        {/* Selected plan panel + simple plan builder */}
         {selectedEntity && (
           <section className="w-full rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
             <div className="flex items-start justify-between gap-3">
@@ -329,11 +402,31 @@ export default function Home() {
               </div>
               <button
                 type="button"
-                onClick={() => setSelectedId(null)}
+                onClick={() => {
+                  setSelectedId(null);
+                  setPlanNotes("");
+                }}
                 className="text-[11px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
               >
                 Clear
               </button>
+            </div>
+
+            {/* NEW: simple plan builder notes */}
+            <div className="mt-3 space-y-1">
+              <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                Plan notes (optional)
+              </label>
+              <textarea
+                value={planNotes}
+                onChange={(e) => setPlanNotes(e.target.value)}
+                rows={3}
+                placeholder="Add where to meet, who’s coming, or any extra details."
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs text-black shadow-sm outline-none focus:border-black focus:ring-1 focus:ring-black dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-50"
+              />
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                These notes stay on this device for now. Later they’ll sync with your account.
+              </p>
             </div>
 
             <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-600 dark:text-zinc-300">
@@ -381,6 +474,61 @@ export default function Home() {
                 <span>Send plan</span>
               </button>
             </div>
+          </section>
+        )}
+
+        {/* Share / invite panel */}
+        {shareTargetId && (
+          <section className="w-full space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm dark:border-zinc-700 dark:bg-zinc-900">
+            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              Share this plan
+            </p>
+
+            <p className="text-xs text-zinc-600 dark:text-zinc-300">
+              Copy the invite text below and paste it into your group chat, text, or email.
+              In a later version, Waypoint will send this for you.
+            </p>
+
+            <textarea
+              value={shareMessage}
+              onChange={(e) => setShareMessage(e.target.value)}
+              rows={3}
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs text-black shadow-sm outline-none focus:border-black focus:ring-1 focus:ring-black dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-50"
+            />
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(shareMessage);
+                    setShareCopied(true);
+                    alert("Plan copied. Paste it into your chat of choice.");
+                  } catch {
+                    setShareCopied(false);
+                    alert(
+                      "Copy failed. You can still select the text above and copy it manually."
+                    );
+                  }
+                }}
+                className="inline-flex items-center justify-center rounded-full bg-black px-4 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-black dark:hover:bg-zinc-300"
+              >
+                {shareCopied ? "Copied!" : "Copy invite text"}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShareTargetId(null)}
+                className="inline-flex items-center justify-center rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+              This is a stub for now. In the full version, you’ll be able to send directly
+              via text, email, or group chat.
+            </p>
           </section>
         )}
 
@@ -444,9 +592,22 @@ export default function Home() {
                 onClick={() => {
                   const summaryDate = eventDate || "[date not set]";
                   const summaryTime = eventTime || "[time not set]";
+
+                  setBookedEvents((prev) => [
+                    ...prev,
+                    {
+                      id: calendarEntity.id,
+                      title: calendarEntity.title,
+                      date: summaryDate,
+                      time: summaryTime,
+                    },
+                  ]);
+
                   alert(
                     `(MVP stub) This would create a calendar event for "${calendarEntity.title}" on ${summaryDate} at ${summaryTime}.`
                   );
+
+                  setCalendarTarget(null);
                 }}
                 className="inline-flex items-center gap-1 rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-black dark:hover:bg-zinc-300"
               >
