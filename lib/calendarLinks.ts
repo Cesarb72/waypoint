@@ -24,6 +24,11 @@ function formatDateForGoogle(date: Date): string {
  */
 export function buildGoogleCalendarLink(plan: Plan): string {
   const start = new Date(plan.dateTime);
+  if (Number.isNaN(start.getTime())) {
+    // Bad date → no link
+    return '';
+  }
+
   const end = new Date(start.getTime() + 60 * 60 * 1000);
 
   const startStr = formatDateForGoogle(start);
@@ -33,7 +38,9 @@ export function buildGoogleCalendarLink(plan: Plan): string {
 
   const params = new URLSearchParams({
     text: plan.title,
-    details: plan.notes ? `${plan.notes}\n\nAttendees: ${plan.attendees}` : `Attendees: ${plan.attendees}`,
+    details: plan.notes
+      ? `${plan.notes}\n\nAttendees: ${plan.attendees}`
+      : `Attendees: ${plan.attendees}`,
   });
 
   if (plan.location) {

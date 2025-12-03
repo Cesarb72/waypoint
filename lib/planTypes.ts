@@ -13,7 +13,6 @@ export type Plan = {
   calendarLink?: string;
 };
 
-// For now, we'll just use the entity name as the title
 export function buildPlanFromEntity(
   entity: Entity,
   input: {
@@ -27,7 +26,7 @@ export function buildPlanFromEntity(
     id: `${entity.id}-${Date.now()}`,
     entityId: entity.id,
     title: entity.name,
-    location: undefined, // can wire this later when Entity has location
+    location: undefined, // can add later if Entity gets a location field
     dateTime: input.dateTime,
     attendees: input.attendees,
     notes: input.notes,
