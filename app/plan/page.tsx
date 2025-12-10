@@ -1,3 +1,6 @@
+// Waypoint V1 – Planner
+// Receives prefill from /? (entity) and lets users define date/time/stops.
+// Saves to localStorage via lib/planStorage. Part of the “V1 locked” flow.
 'use client';
 
 import type React from 'react';

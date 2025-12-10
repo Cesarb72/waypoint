@@ -1,3 +1,6 @@
+// Waypoint V1 – Discovery & Recent Plans
+// Core of the loop: Search → Discover → Select → Plan → Return
+// This file is considered part of the “V1 locked” flow. Be careful changing behavior.
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';

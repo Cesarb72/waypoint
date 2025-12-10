@@ -1,3 +1,6 @@
+// Waypoint V1 – Shared Plan Summary
+// Read-only view for a plan stored in localStorage, reached from Details/Share.
+// Part of the “V1 locked” flow. Changing how plan IDs are handled will affect links.
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -36,7 +39,6 @@ export default function SharedPlanPage() {
       </main>
     );
   }
-
   if (!plan) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 flex items-center justify-center px-4">
@@ -58,7 +60,6 @@ export default function SharedPlanPage() {
       </main>
     );
   }
-
   const dateLabel = plan.date
     ? new Date(`${plan.date}T${plan.time || '00:00'}`).toLocaleString(undefined, {
         weekday: 'short',
