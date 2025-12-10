@@ -1,6 +1,8 @@
+// lib/savedWaypoints.ts
+
 'use client';
 
-import type { Entity, Mood } from '@/data/entities';
+import type { Entity, Mood, CostTag, ProximityTag, UseCaseTag } from '@/data/entities';
 
 export type SavedWaypoint = {
   id: string;
@@ -8,6 +10,9 @@ export type SavedWaypoint = {
   description?: string;
   mood?: Mood;
   location?: string;
+  cost?: CostTag;
+  proximity?: ProximityTag;
+  useCases?: UseCaseTag[];
   savedAt: string;
 };
 
@@ -49,9 +54,12 @@ export function saveWaypointFromEntity(entity: Entity): void {
   const snapshot: SavedWaypoint = {
     id: entity.id,
     name: entity.name,
-    description: (entity as any).description,
-    mood: (entity as any).mood,
-    location: (entity as any).location,
+    description: entity.description,
+    mood: entity.mood,
+    location: entity.location,
+    cost: entity.cost,
+    proximity: entity.proximity,
+    useCases: entity.useCases,
     savedAt: new Date().toISOString(),
   };
 

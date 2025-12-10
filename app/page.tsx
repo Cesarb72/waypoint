@@ -2,10 +2,16 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import type { Entity, Mood } from '@/data/entities';
+import type {
+  Entity,
+  Mood,
+  CostTag,
+  ProximityTag,
+  UseCaseTag,
+} from '@/data/entities';
 import { fetchEntities } from '@/lib/entitySource';
 import { searchEntities } from '@/lib/searchEntities';
-import type { Plan } from '@/lib/planTypes';
+import type { StoredPlan } from '@/lib/planStorage';
 import { loadPlans, deletePlan, clearPlans } from '@/lib/planStorage';
 import {
   loadSavedWaypoints,
@@ -32,6 +38,83 @@ type DisplayWaypoint =
   | { source: 'entity'; entity: Entity }
   | { source: 'saved'; saved: SavedWaypoint };
 
+// Helpers to pretty-print tags on the chips
+function labelCost(cost: CostTag): string {
+  if (cost === 'free') return 'Free';
+  if (cost === 'affordable') return 'Affordable';
+  return 'Splurge';
+}
+
+function labelProximity(p: ProximityTag): string {
+  if (p === 'nearby') return 'Close by';
+  if (p === 'short-drive') return 'Short drive';
+  return 'Worth the trip';
+}
+
+function labelUseCase(u: UseCaseTag): string {
+  switch (u) {
+    case 'casual-date':
+      return 'Casual date';
+    case 'special-occasion':
+      return 'Special occasion';
+    case 'friends-night':
+      return 'Friends night';
+    case 'family-outing':
+      return 'Family outing';
+    case 'solo-reset':
+      return 'Solo reset';
+    default:
+      return u;
+  }
+}
+
+/**
+ * Build a short "Matched for: ..." summary from the intent we know:
+ * - active mood filter
+ * - cost/proximity/useCases tags on the waypoint
+ */
+function buildMatchSummary(options: {
+  query: string;
+  mood: Mood | 'all';
+  cost?: CostTag;
+  proximity?: ProximityTag;
+  useCases?: UseCaseTag[];
+}): string | null {
+  const { mood, cost, proximity, useCases } = options;
+  const parts: string[] = [];
+
+  // Mood intent (only if user explicitly filtered by a mood)
+  if (mood && mood !== 'all') {
+    parts.push(`${mood} mood`);
+  }
+
+  // Tag-based intent from the entity itself
+  if (cost) {
+    const label = labelCost(cost);
+    if (!parts.includes(label)) parts.push(label);
+  }
+
+  if (proximity) {
+    const label = labelProximity(proximity);
+    if (!parts.includes(label)) parts.push(label);
+  }
+
+  if (useCases && useCases.length > 0) {
+    for (const u of useCases) {
+      const label = labelUseCase(u);
+      if (!parts.includes(label)) {
+        parts.push(label);
+      }
+      // We really only need a couple of these shown
+      if (parts.length >= 4) break;
+    }
+  }
+
+  if (parts.length === 0) return null;
+
+  return parts.slice(0, 4).join(' · ');
+}
+
 export default function HomePage() {
   const router = useRouter();
   const pathname = usePathname();
@@ -49,7 +132,7 @@ export default function HomePage() {
   >('idle');
 
   // 💾 Recently created plans (from localStorage)
-  const [recentPlans, setRecentPlans] = useState<Plan[]>([]);
+  const [recentPlans, setRecentPlans] = useState<StoredPlan[]>([]);
 
   // 💾 Saved waypoints (favorites)
   const [savedWaypoints, setSavedWaypoints] = useState<SavedWaypoint[]>([]);
@@ -72,7 +155,6 @@ export default function HomePage() {
         setLocationStatus('available');
       },
       () => {
-        // User denied or error
         setLocationStatus('denied');
       }
     );
@@ -90,7 +172,7 @@ export default function HomePage() {
     setSavedWaypoints(saved);
   }, []);
 
-  // 🔎 Filters from URL (this is the actual query sent to the API)
+  // 🔎 Filters from URL (this is the actual query sent to the API & search)
   const queryFromUrl = searchParams.get('q') ?? '';
 
   const moodFromUrlRaw = (searchParams.get('mood') as Mood | 'all' | null) ?? 'all';
@@ -182,14 +264,14 @@ export default function HomePage() {
     };
   }, [queryFromUrl, coords?.lat, coords?.lng]);
 
-  // 🧠 Centralized search logic (mood-only filter on client)
+  // 🧠 Centralized search logic (text + tags + mood)
   const filteredEntities = useMemo(
     () =>
       searchEntities(data, {
-        query: '',
+        query: queryFromUrl, // use whatever is in the search bar / URL
         mood: moodFromUrl,
       }),
-    [data, moodFromUrl]
+    [data, moodFromUrl, queryFromUrl]
   );
 
   // 📍 Navigate into planning flow WITH a snapshot of the entity
@@ -199,13 +281,15 @@ export default function HomePage() {
     params.set('entityId', entity.id);
     if (queryFromUrl) params.set('q', queryFromUrl);
 
-    // Snapshot data to survive API differences on the /plan page
     params.set('name', entity.name);
-    if ((entity as any).description) {
-      params.set('description', (entity as any).description);
+    if (entity.description) {
+      params.set('description', entity.description);
     }
-    if ((entity as any).mood) {
-      params.set('mood', (entity as any).mood);
+    if (entity.mood) {
+      params.set('mood', entity.mood);
+    }
+    if (entity.location) {
+      params.set('location', entity.location);
     }
 
     router.push(`/plan?${params.toString()}`);
@@ -229,8 +313,17 @@ export default function HomePage() {
     goToPlanForEntity(random);
   }
 
+  // Helper to build a share URL for a plan
+  function getPlanShareUrl(planId: string): string {
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}/p/${encodeURIComponent(planId)}`;
+    }
+    // Fallback for SSR – still a valid relative link
+    return `/p/${encodeURIComponent(planId)}`;
+  }
+
   // 📅 Re-open an existing plan in Calendar
-  function handleOpenPlanCalendar(plan: Plan) {
+  function handleOpenPlanCalendar(plan: StoredPlan) {
     if (!plan.dateTime) {
       window.alert(
         'This plan is missing a date/time. Please recreate it from a waypoint.'
@@ -251,16 +344,16 @@ export default function HomePage() {
 
     const params = new URLSearchParams();
     params.set('text', plan.title);
-    params.set('details', plan.notes ?? '');
-    params.set('location', plan.location);
-    params.set('dates', compact); // start time only; GCal will infer default duration
+    if (plan.notes) params.set('details', plan.notes);
+    if (plan.location) params.set('location', plan.location);
+    params.set('dates', compact);
 
     const href = `https://calendar.google.com/calendar/render?action=TEMPLATE&${params.toString()}`;
     window.open(href, '_blank', 'noopener,noreferrer');
   }
 
   // 🗺️ Open an existing plan in Maps
-  function handleOpenPlanMaps(plan: Plan) {
+  function handleOpenPlanMaps(plan: StoredPlan) {
     const query = plan.location || plan.title;
     if (!query) {
       window.alert('This plan is missing a location. Please recreate it from a waypoint.');
@@ -274,8 +367,34 @@ export default function HomePage() {
   }
 
   // ✏️ Edit an existing plan
-  function handleEditPlan(plan: Plan) {
+  function handleEditPlan(plan: StoredPlan) {
     router.push(`/plan?planId=${encodeURIComponent(plan.id)}`);
+  }
+
+  // 🔍 View shared/summary view of a plan
+  function handleViewDetails(plan: StoredPlan) {
+    router.push(`/p/${encodeURIComponent(plan.id)}`);
+  }
+
+  // 🧷 Share a plan via link (MVP: copy link and/or open)
+  function handleSharePlan(plan: StoredPlan) {
+    const url = getPlanShareUrl(plan.id);
+
+    // Try clipboard first if available
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      navigator.clipboard
+        .writeText(url)
+        .then(() => {
+          window.alert('Share link copied to your clipboard.');
+        })
+        .catch(() => {
+          // Fallback: just open the link
+          window.open(url, '_blank', 'noopener,noreferrer');
+        });
+    } else {
+      // No clipboard: open the shareable link
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
   }
 
   // 🗑️ Remove a single plan
@@ -310,9 +429,6 @@ export default function HomePage() {
 
     if (exists) {
       removeSavedWaypoint(id);
-    } else {
-      // In saved-only view we usually only remove, but keep this here for safety
-      // (no-op for add, since we don't know the full entity here).
     }
 
     const next = loadSavedWaypoints();
@@ -336,13 +452,13 @@ export default function HomePage() {
             Waypoint <span className="text-slate-400">MVP</span>
           </h1>
           <p className="text-sm text-slate-400">
-            A simple flow to go from &ldquo;What should we do?&rdquo; to a scheduled plan with live
-            places, moods, favorites, and a one-tap surprise.
+            Go from &ldquo;What should we do?&rdquo; to a scheduled plan with live places,
+            moods, favorites, and a one-tap surprise.
           </p>
           <p className="text-xs text-slate-500">
-            For testers: pick a <span className="font-semibold">What</span>, optionally add a{' '}
-            <span className="font-semibold">Where</span>, choose a mood, then either select a
-            waypoint, <span className="font-semibold">favorite it</span>, or hit{' '}
+            Pick a <span className="font-semibold">What</span>, optionally add a{' '}
+            <span className="font-semibold">Where</span>, choose a mood, then either select
+            a waypoint, <span className="font-semibold">favorite it</span>, or hit{' '}
             <span className="font-semibold">Surprise me</span>.
           </p>
         </header>
@@ -357,7 +473,7 @@ export default function HomePage() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <input
                 type="text"
-                placeholder="e.g. coffee, parks, art museum, live music"
+                placeholder="e.g. cheap date, cozy bar, birthday dinner, friends night"
                 value={whatInput}
                 onChange={(e) => {
                   setWhatInput(e.target.value);
@@ -391,7 +507,7 @@ export default function HomePage() {
               </label>
               <input
                 type="text"
-                placeholder="e.g. near me, San Jose, Arizona"
+                placeholder="e.g. near me, San Jose, downtown"
                 value={whereInput}
                 onChange={(e) => setWhereInput(e.target.value)}
                 onKeyDown={(e) => {
@@ -423,7 +539,9 @@ export default function HomePage() {
             </div>
 
             <div className="flex flex-col gap-2 sm:w-40">
-              <span className="text-xs font-medium text-slate-300">Feeling indecisive?</span>
+              <span className="text-xs font-medium text-slate-300">
+                Feeling indecisive?
+              </span>
               <button
                 type="button"
                 onClick={handleSurpriseMe}
@@ -433,9 +551,20 @@ export default function HomePage() {
               </button>
             </div>
           </div>
+
+          {/* Helper hint about natural-language search */}
+          <p className="text-[11px] text-slate-500">
+            You can use natural phrases like{' '}
+            <span className="font-medium text-slate-300">
+              &ldquo;cheap date&rdquo;, &ldquo;cozy bar in downtown&rdquo;, or
+              &ldquo;birthday dinner&rdquo;
+            </span>
+            . We match vibes, tags (cost, proximity, use case), and places — even with small
+            typos.
+          </p>
         </section>
 
-        {/* Recent plans (still under controls) */}
+        {/* Recent plans */}
         {recentPlans.length > 0 && (
           <section className="space-y-2 pt-2 border-t border-slate-900/60">
             <div className="flex items-center justify-between">
@@ -455,10 +584,10 @@ export default function HomePage() {
                   key={plan.id}
                   className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex items-center justify-between gap-3"
                 >
-                  <div className="space-y-0.5">
+                  <div className="space-y-0.5 min-w-0">
                     <p className="font-medium text-slate-100 truncate">{plan.title}</p>
                     <p className="text-[11px] text-slate-400 truncate">
-                      {plan.location} ·{' '}
+                      {plan.location ?? 'No location'} ·{' '}
                       {plan.dateTime
                         ? new Date(plan.dateTime).toLocaleString()
                         : 'No time set'}
@@ -485,6 +614,20 @@ export default function HomePage() {
                       className="shrink-0 rounded-md border border-amber-500/70 bg-amber-600/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-600/30"
                     >
                       Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleViewDetails(plan)}
+                      className="shrink-0 rounded-md border border-indigo-500/70 bg-indigo-600/20 px-2 py-1 text-[10px] font-semibold text-indigo-50 hover:bg-indigo-600/30"
+                    >
+                      Details
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSharePlan(plan)}
+                      className="shrink-0 rounded-md border border-fuchsia-500/70 bg-fuchsia-600/20 px-2 py-1 text-[10px] font-semibold text-fuchsia-50 hover:bg-fuchsia-600/30"
+                    >
+                      Share
                     </button>
                     <button
                       type="button"
@@ -544,6 +687,22 @@ export default function HomePage() {
                 {locationStatus === 'requesting' && 'Requesting location…'}
                 {locationStatus === 'denied' && 'Location denied (using default area)'}
               </span>
+
+              {/* Active filters summary */}
+              {(queryFromUrl || moodFromUrl !== 'all') && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {queryFromUrl && (
+                    <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[10px] text-slate-300">
+                      Query: “{queryFromUrl}”
+                    </span>
+                  )}
+                  {moodFromUrl !== 'all' && (
+                    <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[10px] text-slate-300 capitalize">
+                      Mood: {moodFromUrl}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -563,15 +722,31 @@ export default function HomePage() {
             <ul className="space-y-3">
               {displayWaypoints.map((item) => {
                 const id = item.source === 'entity' ? item.entity.id : item.saved.id;
-                const name = item.source === 'entity' ? item.entity.name : item.saved.name;
+                const name =
+                  item.source === 'entity' ? item.entity.name : item.saved.name;
                 const description =
                   item.source === 'entity'
-                    ? (item.entity as any).description
+                    ? item.entity.description
                     : item.saved.description;
-                const mood =
+                const mood: Mood =
                   item.source === 'entity'
-                    ? ((item.entity as any).mood ?? 'chill')
+                    ? item.entity.mood
                     : (item.saved.mood ?? 'chill');
+
+                const cost: CostTag | undefined =
+                  item.source === 'entity'
+                    ? item.entity.cost
+                    : (item.saved.cost as CostTag | undefined);
+
+                const proximity: ProximityTag | undefined =
+                  item.source === 'entity'
+                    ? item.entity.proximity
+                    : (item.saved.proximity as ProximityTag | undefined);
+
+                const useCases: UseCaseTag[] | undefined =
+                  item.source === 'entity'
+                    ? item.entity.useCases
+                    : (item.saved.useCases as UseCaseTag[] | undefined);
 
                 const isSaved = savedWaypoints.some((wp) => wp.id === id);
 
@@ -579,13 +754,16 @@ export default function HomePage() {
                   if (item.source === 'entity') {
                     handlePlanClick(item.entity);
                   } else {
-                    // Build a lightweight Entity from saved snapshot
                     const synthetic: Entity = {
                       id,
                       name,
                       description: description ?? '',
-                      mood: mood as Mood,
-                    } as Entity;
+                      mood,
+                      location: item.saved.location,
+                      cost,
+                      proximity,
+                      useCases,
+                    };
                     handlePlanClick(synthetic);
                   }
                 };
@@ -598,6 +776,17 @@ export default function HomePage() {
                   }
                 };
 
+                const hasAnyChip =
+                  !!cost || !!proximity || (useCases && useCases.length > 0);
+
+                const matchSummary = buildMatchSummary({
+                  query: queryFromUrl,
+                  mood: moodFromUrl,
+                  cost,
+                  proximity,
+                  useCases,
+                });
+
                 return (
                   <li
                     key={id}
@@ -608,6 +797,38 @@ export default function HomePage() {
                         <h2 className="text-sm font-medium">{name}</h2>
                         {description && (
                           <p className="text-xs text-slate-400">{description}</p>
+                        )}
+
+                        {/* Chips row */}
+                        {hasAnyChip && (
+                          <div className="mt-1 flex flex-wrap gap-1.5">
+                            {cost && (
+                              <span className="inline-flex items-center rounded-full border border-emerald-500/50 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-100">
+                                {labelCost(cost)}
+                              </span>
+                            )}
+                            {proximity && (
+                              <span className="inline-flex items-center rounded-full border border-sky-500/50 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-100">
+                                {labelProximity(proximity)}
+                              </span>
+                            )}
+                            {useCases &&
+                              useCases.map((u) => (
+                                <span
+                                  key={u}
+                                  className="inline-flex items-center rounded-full border border-purple-500/50 bg-purple-500/10 px-2 py-0.5 text-[10px] text-purple-100"
+                                >
+                                  {labelUseCase(u)}
+                                </span>
+                              ))}
+                          </div>
+                        )}
+
+                        {matchSummary && (
+                          <p className="text-[11px] text-slate-500 mt-1">
+                            Matched for:{' '}
+                            <span className="text-slate-300">{matchSummary}</span>
+                          </p>
                         )}
                       </div>
                       <div className="flex flex-col items-end gap-1">

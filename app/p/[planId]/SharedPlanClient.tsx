@@ -1,30 +1,20 @@
+// app/p/[planId]/SharedPlanClient.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { loadPlanById, type StoredPlan, type StoredStop } from '@/lib/planStorage';
 
-export default function SharedPlanPage() {
-  const router = useRouter();
-  const params = useParams<{ planId?: string | string[] }>();
+type SharedPlanClientProps = {
+  planId: string;
+};
 
+export default function SharedPlanClient({ planId }: SharedPlanClientProps) {
+  const router = useRouter();
   const [plan, setPlan] = useState<StoredPlan | null | 'loading'>('loading');
 
-  // Safely normalize the planId from the dynamic route
-  const rawPlanId = params?.planId;
-  const planId =
-    typeof rawPlanId === 'string'
-      ? rawPlanId
-      : Array.isArray(rawPlanId)
-      ? rawPlanId[0]
-      : '';
-
+  // Load the plan from localStorage using the *plain* planId
   useEffect(() => {
-    if (!planId) {
-      setPlan(null);
-      return;
-    }
-
     const stored = loadPlanById(planId);
     setPlan(stored ?? null);
   }, [planId]);

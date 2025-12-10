@@ -1,6 +1,6 @@
 // lib/calendarLinks.ts
 
-import type { Plan } from './planTypes';
+import type { StoredPlan } from './planStorage';
 
 /**
  * Format a Date as YYYYMMDDTHHmmssZ for Google Calendar.
@@ -19,13 +19,25 @@ function formatDateForGoogle(date: Date): string {
 }
 
 /**
- * Build a Google Calendar event link from a Plan.
+ * Safely build a JS Date from StoredPlan.date + StoredPlan.time.
+ */
+function getPlanStartDate(plan: StoredPlan): Date | null {
+  if (!plan.date || !plan.time) return null;
+
+  const isoString = `${plan.date}T${plan.time}`;
+  const d = new Date(isoString);
+
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+/**
+ * Build a Google Calendar event link from a StoredPlan.
  * For now, we assume a 1-hour duration.
  */
-export function buildGoogleCalendarLink(plan: Plan): string {
-  const start = new Date(plan.dateTime);
-  if (Number.isNaN(start.getTime())) {
-    // Bad date → no link
+export function buildGoogleCalendarLink(plan: StoredPlan): string {
+  const start = getPlanStartDate(plan);
+  if (!start) {
     return '';
   }
 
@@ -36,16 +48,35 @@ export function buildGoogleCalendarLink(plan: Plan): string {
 
   const base = 'https://calendar.google.com/calendar/render?action=TEMPLATE';
 
+  const detailsParts: string[] = [];
+
+  if (plan.notes) {
+    detailsParts.push(plan.notes);
+  }
+
+  if (plan.attendees) {
+    detailsParts.push(`Attendees: ${plan.attendees}`);
+  }
+
+  if (plan.stops && plan.stops.length > 0) {
+    const stopsSummary = plan.stops
+      .map((stop, index) => {
+        const timePart = stop.time ? ` @ ${stop.time}` : '';
+        const notesPart = stop.notes ? ` — ${stop.notes}` : '';
+        return `${index + 1}. ${stop.label}${timePart}${notesPart}`;
+      })
+      .join('\n');
+
+    detailsParts.push(`Stops:\n${stopsSummary}`);
+  }
+
   const params = new URLSearchParams({
-    text: plan.title,
-    details: plan.notes
-      ? `${plan.notes}\n\nAttendees: ${plan.attendees}`
-      : `Attendees: ${plan.attendees}`,
+    text: plan.title || 'Waypoint plan',
+    details: detailsParts.join('\n\n'),
   });
 
-  if (plan.location) {
-    params.set('location', plan.location);
-  }
+  // If you later add a location field to StoredPlan you can hook it here:
+  // if (plan.location) params.set('location', plan.location);
 
   params.set('dates', `${startStr}/${endStr}`);
 

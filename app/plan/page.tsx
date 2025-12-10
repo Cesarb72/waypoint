@@ -1,6 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import type React from 'react';
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import {
+  upsertPlan,
+  type StoredStop,
+  type StoredPlan,
+  loadPlanById,
+} from '@/lib/planStorage';
 
 type Stop = {
   id: string;
@@ -18,91 +26,114 @@ type PlanDraft = {
   stops: Stop[];
 };
 
-type StoredPlan = {
-  id: string;
-  title: string;
-  date: string;
-  time: string;
-  attendees: string;
-  notes: string;
-  stops: Stop[];
-  createdAt: string;
-};
-
 // Helper to create a new stop with a unique-ish id
-function createStop(label: string = 'Stop') {
+function createStop(label: string = 'Main stop'): Stop {
   return {
-    id: crypto.randomUUID(),
+    id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     label,
     notes: '',
     time: '',
-  } as Stop;
-}
-
-// Helper to save a plan into localStorage "waypoint:plans"
-function savePlanToLocalStorage(draft: PlanDraft): string {
-  if (typeof window === 'undefined') return '';
-
-  const id = crypto.randomUUID();
-  const storedPlan: StoredPlan = {
-    id,
-    title: draft.title || 'Untitled plan',
-    date: draft.date,
-    time: draft.time,
-    attendees: draft.attendees,
-    notes: draft.notes,
-    stops: draft.stops,
-    createdAt: new Date().toISOString(),
   };
-
-  const raw = window.localStorage.getItem('waypoint:plans');
-  const existing: StoredPlan[] = raw ? JSON.parse(raw) : [];
-
-  // Newest first
-  const updated = [storedPlan, ...existing];
-
-  window.localStorage.setItem('waypoint:plans', JSON.stringify(updated));
-  window.localStorage.setItem('waypoint:lastSavedPlanId', id);
-
-  return id;
 }
 
 export default function PlanPage() {
-  const [plan, setPlan] = useState<PlanDraft>({
-    title: '',
-    date: '',
-    time: '',
-    attendees: '',
-    notes: '',
-    stops: [createStop('Main stop')],
-  });
+  const router = useRouter();
+  const params = useSearchParams();
 
+  const urlPlanId = params.get('planId');
+  const waypointName = params.get('name') ?? '';
+  const waypointLocationParam = params.get('location') ?? '';
+  const derivedLocation = waypointLocationParam || waypointName || '';
+
+  const [planId, setPlanId] = useState<string | null>(null);
+  const [plan, setPlan] = useState<PlanDraft | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+
+  // 🧪 Validation state
+  const [hasTriedSubmit, setHasTriedSubmit] = useState(false);
+
+  // 🔄 Initialize from:
+  // - existing plan (edit flow, via ?planId=...)
+  // - or new plan with waypoint name as title
+  useEffect(() => {
+    if (initialized) return;
+
+    if (urlPlanId) {
+      const stored = loadPlanById(urlPlanId);
+      if (stored) {
+        setPlanId(stored.id);
+        setPlan({
+          title: stored.title,
+          date: stored.date,
+          time: stored.time,
+          attendees: stored.attendees ?? '',
+          notes: stored.notes ?? '',
+          stops:
+            stored.stops && stored.stops.length > 0
+              ? stored.stops.map((s) => ({
+                  id: s.id ?? createStop().id,
+                  label: s.label,
+                  notes: s.notes,
+                  time: s.time,
+                }))
+              : [createStop('Main stop')],
+        });
+        setInitialized(true);
+        return;
+      }
+    }
+
+    // New plan case
+    setPlan({
+      title: waypointName || '',
+      date: '',
+      time: '',
+      attendees: '',
+      notes: '',
+      stops: [createStop('Main stop')],
+    });
+    setInitialized(true);
+  }, [initialized, urlPlanId, waypointName]);
 
   function updateField<K extends keyof PlanDraft>(key: K, value: PlanDraft[K]) {
-    setPlan((prev) => ({ ...prev, [key]: value }));
+    if (!plan) return;
+    setPlan((prev) => (prev ? { ...prev, [key]: value } : prev));
   }
 
   function updateStop(stopId: string, partial: Partial<Stop>) {
-    setPlan((prev) => ({
-      ...prev,
-      stops: prev.stops.map((stop) =>
-        stop.id === stopId ? { ...stop, ...partial } : stop
-      ),
-    }));
+    if (!plan) return;
+    setPlan((prev) =>
+      !prev
+        ? prev
+        : {
+            ...prev,
+            stops: prev.stops.map((stop) =>
+              stop.id === stopId ? { ...stop, ...partial } : stop
+            ),
+          }
+    );
   }
 
   function addStop() {
-    setPlan((prev) => ({
-      ...prev,
-      stops: [...prev.stops, createStop(`Stop ${prev.stops.length + 1}`)],
-    }));
+    if (!plan) return;
+    setPlan((prev) =>
+      !prev
+        ? prev
+        : {
+            ...prev,
+            stops: [...prev.stops, createStop(`Stop ${prev.stops.length + 1}`)],
+          }
+    );
   }
 
   function removeStop(stopId: string) {
+    if (!plan) return;
     setPlan((prev) => {
+      if (!prev) return prev;
       const remaining = prev.stops.filter((s) => s.id !== stopId);
-      // Always keep at least one stop
       return {
         ...prev,
         stops: remaining.length > 0 ? remaining : [createStop('Main stop')],
@@ -111,7 +142,9 @@ export default function PlanPage() {
   }
 
   function moveStop(stopId: string, direction: 'up' | 'down') {
+    if (!plan) return;
     setPlan((prev) => {
+      if (!prev) return prev;
       const index = prev.stops.findIndex((s) => s.id === stopId);
       if (index === -1) return prev;
 
@@ -130,25 +163,130 @@ export default function PlanPage() {
     });
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  if (!plan) {
+    // Very brief loading state while we derive the plan
+    return (
+      <main className="min-h-screen bg-slate-950 text-slate-50 flex items-center justify-center">
+        <p className="text-sm text-slate-400">Loading plan…</p>
+      </main>
+    );
+  }
+
+  // ✅ Derived validation flags
+  const isDateValid = plan.date.trim().length > 0;
+  const isTimeValid = plan.time.trim().length > 0;
+  const isCoreInfoValid = isDateValid && isTimeValid;
+
+  // 🔧 Shared helper to turn PlanDraft into StoredPlan input
+  function buildStoredInputFromDraft(draft: PlanDraft): {
+    title: string;
+    date: string;
+    time: string;
+    attendees?: string;
+    notes?: string;
+    stops: StoredStop[];
+    location?: string;
+    id?: string;
+  } {
+    const storedStops: StoredStop[] = draft.stops.map((s) => ({
+      id: s.id,
+      label: s.label,
+      notes: s.notes,
+      time: s.time,
+    }));
+
+    return {
+      id: planId ?? undefined,
+      title: draft.title || waypointName || 'Untitled plan',
+      date: draft.date,
+      time: draft.time,
+      attendees: draft.attendees || '',
+      notes: draft.notes || '',
+      stops: storedStops,
+      location: derivedLocation || undefined,
+    };
+  }
+
+  async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    setHasTriedSubmit(true);
+
+    if (!isCoreInfoValid) {
+      // Let the inline validation + banner guide the user
+      return;
+    }
+
     setIsSaving(true);
 
-    try {
-      const id = savePlanToLocalStorage(plan);
-      console.log('Saved plan with id:', id, 'data:', plan);
+    const storedInput = buildStoredInputFromDraft(plan);
+    const saved: StoredPlan = upsertPlan(storedInput);
+    setPlanId(saved.id);
 
-      // For now we stay on this page and just show a confirmation.
-      // Next step: hook this into the home "Recent plans" view.
-      alert('Plan saved locally. We’ll wire this into Recent plans next.');
-    } finally {
-      setIsSaving(false);
-    }
+    // Small delay just to feel responsive (optional)
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    setIsSaving(false);
+
+    // Redirect to home with a "saved" flag so home can show confirmation
+    router.push('/?saved=1');
   }
+
+  async function handleShareClick() {
+    setHasTriedSubmit(true);
+
+    if (!isCoreInfoValid) {
+      window.alert('Please set a date and time before sharing this plan.');
+      return;
+    }
+
+    setIsSaving(true);
+
+    const storedInput = buildStoredInputFromDraft(plan);
+    const saved: StoredPlan = upsertPlan(storedInput);
+    setPlanId(saved.id);
+
+    const origin =
+      typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+    const shareUrl = `${origin}/p/${saved.id}`;
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+      }
+    } catch {
+      // If clipboard fails, we just skip it silently.
+    }
+
+    setIsSaving(false);
+
+    // ✅ Take the user to the shared plan page so they can visually confirm it
+    router.push(`/p/${saved.id}`);
+  }
+
+  const mapLocation = derivedLocation || plan.title || '';
+
+  const mapHref =
+    mapLocation.length > 0
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+          mapLocation
+        )}`
+      : null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50">
       <div className="mx-auto max-w-2xl px-4 py-8 space-y-6">
+        {/* Simple top nav back to home */}
+        <header className="flex items-center justify-between mb-2">
+          <button
+            type="button"
+            onClick={() => router.push('/')}
+            className="text-sm text-slate-300 hover:text-teal-300"
+          >
+            ← Back to discovery
+          </button>
+          <span className="text-xs text-slate-500">Waypoint · Plan</span>
+        </header>
+
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold">Create a plan</h1>
           <p className="text-sm text-slate-400">
@@ -156,7 +294,16 @@ export default function PlanPage() {
           </p>
         </header>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Validation banner */}
+        {hasTriedSubmit && !isCoreInfoValid && (
+          <div className="rounded-lg border border-amber-500/70 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+            To save or share this plan, please add both a{' '}
+            <span className="font-semibold">date</span> and{' '}
+            <span className="font-semibold">time</span>.
+          </div>
+        )}
+
+        <form onSubmit={handleSave} className="space-y-6">
           {/* Core plan details */}
           <section className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <div className="space-y-2">
@@ -183,9 +330,18 @@ export default function PlanPage() {
                   type="date"
                   value={plan.date}
                   onChange={(e) => updateField('date', e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400"
+                  className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-1 ${
+                    hasTriedSubmit && !isDateValid
+                      ? 'border-red-500 focus:border-red-400 focus:ring-red-400 bg-slate-950'
+                      : 'border-slate-700 bg-slate-950 focus:border-teal-400 focus:ring-teal-400'
+                  }`}
                   required
                 />
+                {hasTriedSubmit && !isDateValid && (
+                  <p className="text-[11px] text-red-300">
+                    Please choose a date for this plan.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -197,9 +353,18 @@ export default function PlanPage() {
                   type="time"
                   value={plan.time}
                   onChange={(e) => updateField('time', e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400"
+                  className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-1 ${
+                    hasTriedSubmit && !isTimeValid
+                      ? 'border-red-500 focus:border-red-400 focus:ring-red-400 bg-slate-950'
+                      : 'border-slate-700 bg-slate-950 focus:border-teal-400 focus:ring-teal-400'
+                  }`}
                   required
                 />
+                {hasTriedSubmit && !isTimeValid && (
+                  <p className="text-[11px] text-red-300">
+                    Please choose a time for this plan.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -231,14 +396,41 @@ export default function PlanPage() {
             </div>
           </section>
 
+          {/* Map preview (lightweight, future-proof) */}
+          {mapHref && (
+            <section className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">Map preview</h2>
+                  <p className="text-xs text-slate-400">
+                    Quick link to see this plan&apos;s starting area in Google Maps.
+                  </p>
+                </div>
+                <a
+                  href={mapHref}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-lg border border-sky-500/70 bg-sky-600/20 px-3 py-1.5 text-[11px] font-medium text-sky-100 hover:bg-sky-600/30"
+                >
+                  Open in Maps
+                </a>
+              </div>
+
+              <div className="mt-2 h-32 rounded-lg border border-slate-800 bg-slate-950/60 flex items-center justify-center px-4 text-[11px] text-slate-500 text-center">
+                A small map embed will live here in a future version. For now, use the
+                button above to open Google Maps for{' '}
+                <span className="text-slate-300 font-medium">{mapLocation}</span>.
+              </div>
+            </section>
+          )}
+
           {/* Multi-stop section */}
           <section className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between gap-2">
               <div>
                 <h2 className="text-sm font-semibold">Stops</h2>
                 <p className="text-xs text-slate-400">
-                  Break the night into simple stops: drinks, dinner, dessert,
-                  scenic walk…
+                  Break the night into simple stops: drinks, dinner, dessert, scenic walk…
                 </p>
               </div>
               <button
@@ -351,14 +543,22 @@ export default function PlanPage() {
           <div className="flex items-center justify-end gap-3">
             <button
               type="button"
-              onClick={() => history.back()}
+              onClick={() => router.push('/')}
               className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
             >
               Cancel
             </button>
             <button
+              type="button"
+              onClick={handleShareClick}
+              disabled={isSaving || !isCoreInfoValid}
+              className="rounded-lg border border-violet-400/70 bg-violet-500/30 px-4 py-2 text-sm font-semibold text-violet-50 hover:bg-violet-500/40 disabled:opacity-60"
+            >
+              {isSaving ? 'Sharing…' : 'Share plan'}
+            </button>
+            <button
               type="submit"
-              disabled={isSaving}
+              disabled={isSaving || !isCoreInfoValid}
               className="rounded-lg bg-teal-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-60"
             >
               {isSaving ? 'Saving…' : 'Save plan'}
