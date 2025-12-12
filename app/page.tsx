@@ -71,53 +71,6 @@ function labelUseCase(u: UseCaseTag): string {
   }
 }
 
-/**
- * Build a short "Matched for: ..." summary from the intent we know:
- * - active mood filter
- * - cost/proximity/useCases tags on the waypoint
- */
-function buildMatchSummary(options: {
-  query: string;
-  mood: Mood | 'all';
-  cost?: CostTag;
-  proximity?: ProximityTag;
-  useCases?: UseCaseTag[];
-}): string | null {
-  const { mood, cost, proximity, useCases } = options;
-  const parts: string[] = [];
-
-  // Mood intent (only if user explicitly filtered by a mood)
-  if (mood && mood !== 'all') {
-    parts.push(`${mood} mood`);
-  }
-
-  // Tag-based intent from the entity itself
-  if (cost) {
-    const label = labelCost(cost);
-    if (!parts.includes(label)) parts.push(label);
-  }
-
-  if (proximity) {
-    const label = labelProximity(proximity);
-    if (!parts.includes(label)) parts.push(label);
-  }
-
-  if (useCases && useCases.length > 0) {
-    for (const u of useCases) {
-      const label = labelUseCase(u);
-      if (!parts.includes(label)) {
-        parts.push(label);
-      }
-      // We really only need a couple of these shown
-      if (parts.length >= 4) break;
-    }
-  }
-
-  if (parts.length === 0) return null;
-
-  return parts.slice(0, 4).join(' · ');
-}
-
 export default function HomePage() {
   const router = useRouter();
   const pathname = usePathname();
@@ -278,25 +231,26 @@ export default function HomePage() {
   );
 
   // 📍 Navigate into planning flow WITH a snapshot of the entity
-  function goToPlanForEntity(entity: Entity) {
-    const params = new URLSearchParams();
+function goToPlanForEntity(entity: Entity) {
+  const params = new URLSearchParams();
 
-    params.set('entityId', entity.id);
-    if (queryFromUrl) params.set('q', queryFromUrl);
+  params.set('entityId', entity.id);
+  if (queryFromUrl) params.set('q', queryFromUrl);
 
-    params.set('name', entity.name);
-    if (entity.description) {
-      params.set('description', entity.description);
-    }
-    if (entity.mood) {
-      params.set('mood', entity.mood);
-    }
-    if (entity.location) {
-      params.set('location', entity.location);
-    }
-
-    router.push(`/plan?${params.toString()}`);
+  params.set('name', entity.name);
+  if (entity.description) {
+    params.set('description', entity.description);
   }
+  if (entity.mood) {
+    params.set('mood', entity.mood);
+  }
+  // 👇 NEW: pass the location through to /plan
+  if (entity.location) {
+    params.set('location', entity.location);
+  }
+
+  router.push(`/plan?${params.toString()}`);
+}
 
   // 🎯 When user clicks "Plan this"
   function handlePlanClick(entity: Entity) {
@@ -343,7 +297,7 @@ export default function HomePage() {
     }
 
     const iso = date.toISOString(); // e.g. 2025-12-01T08:30:00.000Z
-    const compact = iso.replace(/[-:]/g, '').split('.')[0] + 'Z';
+const compact = iso.replace(/[-:]/g, '').split('.')[0] + 'Z';
 
     const params = new URLSearchParams();
     params.set('text', plan.title);
@@ -580,20 +534,31 @@ export default function HomePage() {
                 Clear all
               </button>
             </div>
+<p className="text-[11px] text-slate-500">
+  Quickly revisit or share plans you’ve already created.
+</p>
 
             <ul className="space-y-2">
               {recentPlans.map((plan) => (
                 <li
-                  key={plan.id}
-                  className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex items-center justify-between gap-3"
-                >
+  key={plan.id}
+  className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex items-center justify-between gap-3
+             hover:border-slate-600 hover:bg-slate-900 transition-colors"
+>              
                   <div className="space-y-0.5 min-w-0">
                     <p className="font-medium text-slate-100 truncate">{plan.title}</p>
                     <p className="text-[11px] text-slate-400 truncate">
                       {plan.location ?? 'No location'} ·{' '}
-                      {plan.dateTime
-                        ? new Date(plan.dateTime).toLocaleString()
-                        : 'No time set'}
+{plan.dateTime
+  ? new Date(plan.dateTime).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    })
+  : 'No time set'}
+
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-1.5 justify-end">
@@ -782,14 +747,6 @@ export default function HomePage() {
                 const hasAnyChip =
                   !!cost || !!proximity || (useCases && useCases.length > 0);
 
-                const matchSummary = buildMatchSummary({
-                  query: queryFromUrl,
-                  mood: moodFromUrl,
-                  cost,
-                  proximity,
-                  useCases,
-                });
-
                 return (
                   <li
                     key={id}
@@ -825,13 +782,6 @@ export default function HomePage() {
                                 </span>
                               ))}
                           </div>
-                        )}
-
-                        {matchSummary && (
-                          <p className="text-[11px] text-slate-500 mt-1">
-                            Matched for:{' '}
-                            <span className="text-slate-300">{matchSummary}</span>
-                          </p>
                         )}
                       </div>
                       <div className="flex flex-col items-end gap-1">
@@ -876,3 +826,4 @@ export default function HomePage() {
     </main>
   );
 }
+

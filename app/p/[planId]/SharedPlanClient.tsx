@@ -13,7 +13,7 @@ export default function SharedPlanClient({ planId }: SharedPlanClientProps) {
   const router = useRouter();
   const [plan, setPlan] = useState<StoredPlan | null | 'loading'>('loading');
 
-  // Load the plan from localStorage using the *plain* planId
+  // Load the plan from localStorage using the planId prop
   useEffect(() => {
     const stored = loadPlanById(planId);
     setPlan(stored ?? null);

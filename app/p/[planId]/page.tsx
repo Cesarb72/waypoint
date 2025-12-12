@@ -3,31 +3,42 @@
 // Part of the “V1 locked” flow. Changing how plan IDs are handled will affect links.
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { use, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { loadPlanById, type StoredPlan, type StoredStop } from '@/lib/planStorage';
 
-export default function SharedPlanPage() {
+function formatTime12h(time?: string): string | null {
+  if (!time) return null;
+
+  const [hourStr, minuteStr] = time.split(':');
+  const hour = Number(hourStr);
+  const minute = Number(minuteStr);
+
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return time;
+
+  const period = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+
+  return `${hour12}:${minuteStr} ${period}`;
+}
+
+
+type RouteParams = {
+  planId: string;
+};
+
+type SharedPlanPageProps = {
+  params: Promise<RouteParams>;
+};
+
+export default function SharedPlanPage({ params }: SharedPlanPageProps) {
   const router = useRouter();
-  const params = useParams<{ planId?: string | string[] }>();
+  const { planId } = use(params);
 
   const [plan, setPlan] = useState<StoredPlan | null | 'loading'>('loading');
 
-  // Safely normalize the planId from the dynamic route
-  const rawPlanId = params?.planId;
-  const planId =
-    typeof rawPlanId === 'string'
-      ? rawPlanId
-      : Array.isArray(rawPlanId)
-      ? rawPlanId[0]
-      : '';
-
+  // Load the plan from the dynamic route param
   useEffect(() => {
-    if (!planId) {
-      setPlan(null);
-      return;
-    }
-
     const stored = loadPlanById(planId);
     setPlan(stored ?? null);
   }, [planId]);
@@ -39,6 +50,7 @@ export default function SharedPlanPage() {
       </main>
     );
   }
+
   if (!plan) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 flex items-center justify-center px-4">
@@ -60,17 +72,21 @@ export default function SharedPlanPage() {
       </main>
     );
   }
-  const dateLabel = plan.date
-    ? new Date(`${plan.date}T${plan.time || '00:00'}`).toLocaleString(undefined, {
-        weekday: 'short',
-        month: 'short',
-        day: 'numeric',
-        hour: plan.time ? 'numeric' : undefined,
-        minute: plan.time ? '2-digit' : undefined,
-      })
-    : 'Date not set';
+
+const dateLabel = plan.date
+  ? new Date(`${plan.date}T${plan.time || '00:00'}`).toLocaleString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: plan.time ? 'numeric' : undefined,
+      minute: plan.time ? '2-digit' : undefined,
+      hour12: true,
+    })
+  : 'Date not set';
+
 
   const stops: StoredStop[] = plan.stops ?? [];
+  const primaryLocation = plan.location || plan.title || '';
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50">
@@ -88,25 +104,51 @@ export default function SharedPlanPage() {
         </header>
 
         {/* Title + basic meta */}
-        <section className="space-y-2">
-          <h1 className="text-2xl font-semibold">
-            {plan.title || plan.location || 'Untitled plan'}
-          </h1>
-          <p className="text-sm text-slate-400">
-            {dateLabel}
-            {plan.attendees && (
-              <>
-                {' '}
-                · <span className="text-slate-300">{plan.attendees}</span>
-              </>
-            )}
-          </p>
-          {plan.location && (
-            <p className="text-xs text-slate-500">
-              Starting near <span className="text-slate-300">{plan.location}</span>
+<section className="space-y-2">
+  <h1 className="text-2xl font-semibold">
+    {plan.title || plan.location || 'Untitled plan'}
+  </h1>
+
+  <p className="text-sm text-slate-400">
+    {dateLabel}
+    {plan.attendees && (
+      <>
+        {' '}
+        · <span className="text-slate-300">{plan.attendees}</span>
+      </>
+    )}
+  </p>
+
+  <p className="text-xs text-slate-500">
+    Starting area:{' '}
+    <span className="text-slate-300">
+      {plan.location ? plan.location : 'Not set'}
+    </span>
+  </p>
+</section>
+
+
+        {/* Map preview (real tiles via Google Maps embed) */}
+        {primaryLocation && (
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-2">
+            <h2 className="text-sm font-semibold text-slate-100">Map preview</h2>
+            <p className="text-xs text-slate-400">
+              Approximate area around{' '}
+              <span className="text-slate-200">{primaryLocation}</span>.
             </p>
-          )}
-        </section>
+            <div className="mt-2 aspect-[16/9] rounded-lg overflow-hidden border border-slate-800 bg-slate-900">
+              <iframe
+                title={`Map of ${primaryLocation}`}
+                src={`https://www.google.com/maps?q=${encodeURIComponent(
+                  primaryLocation
+                )}&output=embed`}
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+                className="w-full h-full border-0"
+              />
+            </div>
+          </section>
+        )}
 
         {/* Notes */}
         {plan.notes && plan.notes.trim().length > 0 && (
@@ -120,9 +162,10 @@ export default function SharedPlanPage() {
         <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-slate-100">Stops</h2>
-            <span className="text-[11px] text-slate-500">
-              {stops.length} stop{stops.length === 1 ? '' : 's'}
-            </span>
+<span className="text-[11px] text-slate-500">
+  {stops.length} stop{stops.length === 1 ? '' : 's'} · Reorder in planner if needed.
+</span>
+
           </div>
 
           {stops.length === 0 && (
@@ -143,7 +186,7 @@ export default function SharedPlanPage() {
                   </p>
                   {stop.time && (
                     <span className="text-[11px] rounded-full border border-slate-700 px-2 py-0.5 text-slate-300">
-                      {stop.time}
+                      {formatTime12h(stop.time)}
                     </span>
                   )}
                 </div>
@@ -171,7 +214,7 @@ export default function SharedPlanPage() {
               }
               className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
             >
-              Edit this plan
+Edit in planner
             </button>
           </div>
         </div>
@@ -179,3 +222,4 @@ export default function SharedPlanPage() {
     </main>
   );
 }
+
