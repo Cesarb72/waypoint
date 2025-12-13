@@ -25,7 +25,7 @@ export type Entity = {
   proximity?: ProximityTag;
   useCases?: UseCaseTag[];
   /**
-   * Free-form text tags / keywords that the search layer can match against.
+   * free-form text tags / keywords that the search layer can match against.
    * e.g. ["cheap date", "patio", "cocktails", "san jose"]
    */
   tags?: string[];
