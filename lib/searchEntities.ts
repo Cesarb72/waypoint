@@ -39,10 +39,10 @@ const COST_KEYWORDS: Record<CostTag, string[]> = {
 const PROXIMITY_KEYWORDS: Record<ProximityTag, string[]> = {
   nearby: ['near me', 'nearby', 'close', 'walkable', 'walking distance'],
   'short-drive': ['short drive', 'quick drive', '10 min drive', '15 min drive'],
-  'worth-the-trip': [
+  'worth-it': [
     'day trip',
     'road trip',
-    'worth the trip',
+    'worth-it',
     'far',
     'drive out',
   ],
