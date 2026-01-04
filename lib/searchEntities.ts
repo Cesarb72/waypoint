@@ -31,9 +31,10 @@ function contains(haystack: string, needle: string): boolean {
  */
 
 const COST_KEYWORDS: Record<CostTag, string[]> = {
-  free: ['free', 'no money', 'no-cost', 'no cost'],
-  affordable: ['cheap', 'affordable', 'budget', 'low cost', 'inexpensive'],
-  splurge: ['fancy', 'splurge', 'upscale', 'expensive', 'bougie', 'nice dinner'],
+  Free: ['free', 'no money', 'no-cost', 'no cost'],
+  '$': ['cheap', 'affordable', 'budget', 'low cost', 'inexpensive'],
+  '$$': ['mid', 'moderate', 'dinner out', 'date night', 'midrange'],
+  '$$$': ['fancy', 'splurge', 'upscale', 'expensive', 'bougie', 'nice dinner'],
 };
 
 const PROXIMITY_KEYWORDS: Record<ProximityTag, string[]> = {

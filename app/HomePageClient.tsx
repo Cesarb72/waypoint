@@ -59,9 +59,11 @@ const PENDING_STARTER_KEY = 'waypoint_pending_starter';
 
 // Helpers to pretty-print tags on the chips
 function labelCost(cost: CostTag): string {
-  if (cost === 'free') return 'Free';
-  if (cost === 'affordable') return 'Affordable';
-  return 'Splurge';
+  if (cost === 'Free') return 'Free';
+  if (cost === '$') return '$';
+  if (cost === '$$') return '$$';
+  if (cost === '$$$') return '$$$';
+  return String(cost);
 }
 
 function labelProximity(p: ProximityTag): string {
