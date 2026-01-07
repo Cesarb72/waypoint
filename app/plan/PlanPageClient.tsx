@@ -389,7 +389,7 @@ export default function PlanPage() {
 
             <div className="space-y-2">
               <label className="text-sm font-medium" htmlFor="attendees">
-                Who&apos;s coming? (optional)
+                Who’s coming? (optional)
               </label>
               <input
                 id="attendees"
@@ -548,7 +548,7 @@ export default function PlanPage() {
               disabled={isSaving}
               className="rounded-lg border border-violet-400/70 bg-violet-500/30 px-4 py-2 text-sm font-semibold text-violet-50 hover:bg-violet-500/40 disabled:opacity-60"
             >
-              {isSaving ? 'Sharing…' : 'Share plan'}
+              {isSaving ? 'Sharing…' : 'Share this version'}
             </button>
 
             <button

@@ -8,9 +8,11 @@ export type PlanIndexItem = {
   encoded: string;
   updatedAt: string;
   isSaved: boolean;
+  isShared?: boolean;
 };
 
 const STORAGE_KEY = 'waypoint.v2.plansIndex';
+const SHARED_KEY = 'waypoint.v2.sharedIndex';
 const MAX_RECENT = 25;
 
 function hasLocalStorage(): boolean {
@@ -43,6 +45,28 @@ function sortByUpdated(items: PlanIndexItem[]): PlanIndexItem[] {
   return [...items].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
   );
+}
+
+function readSharedSet(): Set<string> {
+  if (!hasLocalStorage()) return new Set();
+  try {
+    const raw = window.localStorage.getItem(SHARED_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSharedSet(ids: Set<string>): void {
+  if (!hasLocalStorage()) return;
+  try {
+    window.localStorage.setItem(SHARED_KEY, JSON.stringify(Array.from(ids)));
+  } catch {
+    // ignore storage failures
+  }
 }
 
 export function purgeInvalidOrLegacyPlans(items: PlanIndexItem[]): PlanIndexItem[] {
@@ -90,12 +114,14 @@ export function upsertRecentPlan(plan: Plan): PlanIndexItem {
     encoded,
     updatedAt,
     isSaved: false,
+    isShared: undefined,
   };
 
   const existing = readIndex();
   const existingIdx = existing.findIndex((item) => item.id === plan.id);
   if (existingIdx >= 0) {
     nextItem.isSaved = existing[existingIdx].isSaved;
+    nextItem.isShared = existing[existingIdx].isShared;
     existing.splice(existingIdx, 1);
   }
 
@@ -141,4 +167,17 @@ export function removePlanById(id: string): void {
 // Backward compatibility alias
 export function removePlanFromIndex(id: string): void {
   removePlanById(id);
+}
+
+export function markPlanShared(id: string): void {
+  const set = readSharedSet();
+  if (!id) return;
+  set.add(id);
+  saveSharedSet(set);
+}
+
+export function isPlanShared(id: string): boolean {
+  if (!id) return false;
+  const set = readSharedSet();
+  return set.has(id);
 }

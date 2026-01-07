@@ -24,6 +24,16 @@ function contains(haystack: string, needle: string): boolean {
   return haystack.includes(needle.toLowerCase());
 }
 
+function countKeywordHits(haystack: string, keywords: string[]): number {
+  let hits = 0;
+  for (const keyword of keywords) {
+    if (haystack.includes(keyword)) {
+      hits += 1;
+    }
+  }
+  return hits;
+}
+
 /**
  * Keyword → tag dictionaries
  * These make queries like "romantic dinner night" / "cheap adventure"
@@ -156,9 +166,9 @@ function inferIntentFromQuery(query: string | undefined) {
 /**
  * Main search / ranking function.
  *
- * - Uses text search across name/description/location/useCases
+ * - Uses text search across name/description/location/useCases/tags
  * - Uses inferred intent from keywords → tags
- * - Respects mood filter (if provided)
+ * - Uses mood filter to boost ordering (not a hard filter)
  * - Has a soft fallback so "weird" queries still show *something*
  */
 export function searchEntities(
@@ -180,11 +190,6 @@ export function searchEntities(
   const scored: Scored[] = [];
 
   for (const entity of entities) {
-    // 1. Respect explicit mood filter from UI
-    if (moodFilter !== 'all' && entity.mood !== moodFilter) {
-      continue;
-    }
-
     let score = 0;
 
     const haystack = [
@@ -192,6 +197,7 @@ export function searchEntities(
       entity.description,
       entity.location,
       entity.useCases?.join(' '),
+      entity.tags?.join(' '),
     ]
       .map((x) => norm(x))
       .join(' ');
@@ -224,6 +230,23 @@ export function searchEntities(
       score += 4;
     }
 
+    if (inferred.mood && inferred.mood !== moodFilter) {
+      const hits = countKeywordHits(haystack, MOOD_KEYWORDS[inferred.mood]);
+      if (hits > 0) {
+        score += 2 + hits;
+      }
+    }
+
+    if (moodFilter !== 'all') {
+      if (entity.mood === moodFilter) {
+        score += 4;
+      }
+      const hits = countKeywordHits(haystack, MOOD_KEYWORDS[moodFilter]);
+      if (hits > 0) {
+        score += 2 + hits;
+      }
+    }
+
     // Cost
     if (inferred.cost && entity.cost === inferred.cost) {
       score += 3;
@@ -241,6 +264,15 @@ export function searchEntities(
       ).length;
       if (overlap > 0) {
         score += 4 + overlap; // more overlap → slightly more score
+      }
+    }
+
+    if (inferred.useCases.length > 0) {
+      for (const useCase of inferred.useCases) {
+        const hits = countKeywordHits(haystack, USE_CASE_KEYWORDS[useCase]);
+        if (hits > 0) {
+          score += 2 + hits;
+        }
       }
     }
 

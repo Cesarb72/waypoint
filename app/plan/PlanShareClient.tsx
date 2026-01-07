@@ -7,6 +7,7 @@ import { deserializePlan } from '../plan-engine';
 import ShareablePlanView from '../surfaces/ShareablePlanView';
 import { ctaClass } from '../ui/cta';
 import { getSupabaseBrowserClient } from '../lib/supabaseBrowserClient';
+import { markPlanShared, isPlanShared } from '../utils/planStorage';
 
 function sanitizeOrigin(raw?: string | null): string | null {
   if (!raw) return null;
@@ -29,6 +30,8 @@ export default function PlanShareClient() {
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const [userId, setUserId] = useState<string | null>(null);
   const [isOwned, setIsOwned] = useState(false);
+  const [shareStatus, setShareStatus] = useState<'idle' | 'copied'>('idle');
+  const [isShared, setIsShared] = useState(false);
 
   const { plan, error } = useMemo(() => {
     if (!encoded) return { plan: null, error: null };
@@ -99,6 +102,11 @@ export default function PlanShareClient() {
     return `/plan?${params.toString()}`;
   }, [encoded, fromEdit]);
 
+  const shareFullUrl = useMemo(() => {
+    if (!sharePath) return null;
+    return typeof window !== 'undefined' ? `${window.location.origin}${sharePath}` : sharePath;
+  }, [sharePath]);
+
   const createCopyHref = useMemo(() => {
     if (!encoded) return null;
     const params = new URLSearchParams();
@@ -108,6 +116,12 @@ export default function PlanShareClient() {
     }
     return `/create?${params.toString()}`;
   }, [encoded, sharePath]);
+
+  useEffect(() => {
+    if (plan?.id) {
+      setIsShared(isPlanShared(plan.id));
+    }
+  }, [plan?.id]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -148,6 +162,21 @@ export default function PlanShareClient() {
     };
   }, [plan?.id, supabase, userId]);
 
+  async function handleCopyShare() {
+    if (!shareFullUrl || typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(shareFullUrl);
+      if (plan?.id) {
+        markPlanShared(plan.id);
+        setIsShared(true);
+      }
+      setShareStatus('copied');
+      setTimeout(() => setShareStatus('idle'), 1500);
+    } catch {
+      // Ignore copy failures in preview
+    }
+  }
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50">
       {/* TEMP/DEV: lightweight escape hatch back to home */}
@@ -156,38 +185,38 @@ export default function PlanShareClient() {
           Home
         </Link>
       </div>
-      {fromEdit === 'true' && encoded ? (
+      {isShared ? (
         <div className="px-4 pt-2">
-          <Link href={`/create?from=${encodeURIComponent(encoded)}`} className={ctaClass('chip')}>
-            Back to editing this plan
-          </Link>
+          <div className="flex flex-col gap-1 rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2 text-emerald-50 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
+                Shared
+              </span>
+              <span className="text-sm font-medium">This plan was shared with you.</span>
+            </div>
+            <span className="text-[11px] text-emerald-100">Editing will create your own copy.</span>
+          </div>
         </div>
       ) : null}
-      {origin ? (
-        <div className="px-4 pt-2">
-          <Link href={origin} className={ctaClass('chip')}>
-            Back to your copy
-          </Link>
-        </div>
+      {plan ? (
+        <>
+          <ShareablePlanView
+            plan={plan}
+            isShared={isShared}
+            actions={
+              createCopyHref
+                ? {
+                    createCopyHref,
+                    shareFullUrl,
+                    onCopyShare: handleCopyShare,
+                    isShared,
+                    shareStatus,
+                  }
+                : undefined
+            }
+          />
+        </>
       ) : null}
-      {createCopyHref ? (
-        <div className="px-4 pt-2">
-          <Link href={createCopyHref} className={ctaClass('primary')}>
-            {isOwned ? 'Edit this plan' : 'Edit your copy'}
-          </Link>
-          {!isOwned ? (
-            <p className="text-[11px] text-slate-400 mt-1">
-              This creates your own version. The original won&apos;t change.
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-      <div className="px-4 pt-2">
-        <p className="text-xs text-slate-400">
-          You're viewing a shared Waypoint. Editing creates your own copy.
-        </p>
-      </div>
-      {plan ? <ShareablePlanView plan={plan} /> : null}
     </main>
   );
 }

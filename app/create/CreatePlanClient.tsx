@@ -1,7 +1,7 @@
-﻿'use client';
+'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   createEmptyPlan,
@@ -16,6 +16,8 @@ import {
   getPlansIndex,
   setSavedById,
   upsertRecentPlan,
+  isPlanShared,
+  markPlanShared,
 } from '../utils/planStorage';
 import { PLAN_TEMPLATES } from '../templates/planTemplates';
 import { ctaClass } from '../ui/cta';
@@ -46,7 +48,10 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
     })
   );
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied'>('idle');
+  const [hasShared, setHasShared] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
+  const [isCommitted, setIsCommitted] = useState(false);
+  const [commitStatus, setCommitStatus] = useState<'idle' | 'saving' | 'done' | 'error'>('idle');
   const [userId, setUserId] = useState<string | null>(null);
   const [sourceExistsInSupabase, setSourceExistsInSupabase] = useState(false);
   const [sourceOwnedByUser, setSourceOwnedByUser] = useState(false);
@@ -54,6 +59,11 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
   const [planHydratedFromSource, setPlanHydratedFromSource] = useState(!fromEncoded);
   const [variationOptions, setVariationOptions] = useState<VariationOption[]>([]);
   const [showVariations, setShowVariations] = useState(false);
+  const hasPrefilledFromSource = useRef(false);
+
+  useEffect(() => {
+    setHasShared(isPlanShared(plan.id));
+  }, [plan.id]);
 
   function clonePlanForVariation(base: Plan): Plan {
     const cloned = createPlanFromTemplate(base);
@@ -160,6 +170,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
   useEffect(() => {
     const existing = getPlansIndex().find((item) => item.id === plan.id);
     setIsSaved(existing?.isSaved ?? false);
+    setIsCommitted(!!existing);
   }, [plan.id]);
   useEffect(() => {
     if (!fromEncoded) return;
@@ -238,6 +249,41 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
     setShowCopyNotice(true);
   }, [fromEncoded]);
 
+  useEffect(() => {
+    // Ensure source-driven plans have a meaningful title/anchor stop when they arrive
+    if (!planHydratedFromSource || hasPrefilledFromSource.current) return;
+    let nextPlan = plan;
+    let updated = false;
+    const hasTitle = (nextPlan.title ?? '').trim().length > 0;
+    if (!hasTitle) {
+      nextPlan = {
+        ...nextPlan,
+        title: 'Waypoint idea',
+        intent: nextPlan.intent || 'Start with this setup.',
+      };
+      updated = true;
+    }
+    if (!nextPlan.stops || nextPlan.stops.length === 0) {
+      const anchorStop: Stop = {
+        id: generateStopId(),
+        name: nextPlan.title || 'Anchor stop',
+        role: 'anchor',
+        optionality: 'required',
+        notes: nextPlan.intent || 'Kick things off here.',
+      };
+      nextPlan = { ...nextPlan, stops: [anchorStop] };
+      updated = true;
+    }
+    if (updated) {
+      setPlan(nextPlan);
+    }
+    hasPrefilledFromSource.current = true;
+  }, [plan, planHydratedFromSource]);
+
+  useEffect(() => {
+    hasPrefilledFromSource.current = false;
+  }, [plan.id]);
+
   function generateStopId() {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
       return crypto.randomUUID();
@@ -276,7 +322,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
 
   async function handleOpenShare() {
     if (!encodedPath) return;
-    await persistPlan();
+    await syncIfCommitted(plan);
     const url = `${encodedPath}&fromEdit=true`;
     router.push(url);
   }
@@ -302,9 +348,11 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
       return;
     }
     try {
-      await persistPlan();
+      await syncIfCommitted(plan);
       await navigator.clipboard.writeText(encodedFullUrl);
+      markPlanShared(plan.id);
       setShareStatus('copied');
+      setHasShared(true);
       setTimeout(() => setShareStatus('idle'), 1500);
     } catch {
       // ignore copy errors in this lightweight UI
@@ -333,48 +381,68 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
     });
   }
 
-  const persistPlan = useCallback(async () => {
-    upsertRecentPlan(plan);
-    if (!userId) return;
-    try {
-      const parentId =
-        sourceExistsInSupabase && sourcePlanId && sourcePlanId !== plan.id ? sourcePlanId : null;
-      await supabase.from('waypoints').upsert(
-        {
-          id: plan.id,
-          owner_id: userId,
-          title: plan.title || 'Waypoint',
-          plan,
-          parent_id: parentId,
-        },
-        { onConflict: 'id' }
-      );
-    } catch {
-      // ignore persistence errors to keep UI lightweight
-    }
-  }, [plan, sourceExistsInSupabase, sourcePlanId, supabase, userId]);
-
-  const persistNewPlan = useCallback(
-    async (nextPlan: Plan, parentId?: string | null) => {
-      upsertRecentPlan(nextPlan);
+  const syncIfCommitted = useCallback(
+    async (nextPlan: Plan) => {
+      if (!isCommitted) return;
+      const saved = upsertRecentPlan(nextPlan);
+      setIsSaved(saved.isSaved);
       if (!userId) return;
       try {
+        const parentId =
+          sourceExistsInSupabase && sourcePlanId && sourcePlanId !== nextPlan.id
+            ? sourcePlanId
+            : null;
         await supabase.from('waypoints').upsert(
           {
             id: nextPlan.id,
             owner_id: userId,
             title: nextPlan.title || 'Waypoint',
             plan: nextPlan,
-            parent_id: parentId ?? null,
+            parent_id: parentId,
           },
           { onConflict: 'id' }
         );
       } catch {
-        // ignore persistence errors in this lightweight flow
+        // ignore persistence errors to keep UI lightweight
       }
     },
-    [supabase, userId]
+    [isCommitted, sourceExistsInSupabase, sourcePlanId, supabase, userId]
   );
+
+  const handleCommitPlan = useCallback(async () => {
+    setCommitStatus('saving');
+    try {
+      const saved = upsertRecentPlan(plan);
+      setIsSaved(saved.isSaved);
+      if (userId) {
+        const parentId =
+          sourceExistsInSupabase && sourcePlanId && sourcePlanId !== plan.id
+            ? sourcePlanId
+            : null;
+        await supabase.from('waypoints').upsert(
+          {
+            id: plan.id,
+            owner_id: userId,
+            title: plan.title || 'Waypoint',
+            plan,
+            parent_id: parentId,
+          },
+          { onConflict: 'id' }
+        );
+      }
+      setIsCommitted(true);
+      setCommitStatus('done');
+      setTimeout(() => setCommitStatus('idle'), 1200);
+    } catch {
+      setCommitStatus('error');
+      setTimeout(() => setCommitStatus('idle'), 1500);
+    }
+  }, [plan, sourceExistsInSupabase, sourcePlanId, supabase, userId]);
+
+  useEffect(() => {
+    if (!isCommitted) return;
+    void syncIfCommitted(plan);
+  }, [isCommitted, plan, syncIfCommitted]);
 
   useEffect(() => {
     if (!fromEncoded) return;
@@ -403,7 +471,6 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
 
   const handleUseVariation = useCallback(
     async (option: VariationOption) => {
-      const parentId = plan.id && option.plan.id !== plan.id ? plan.id : null;
       handleDismissVariations();
       const nextPlan = createPlanFromTemplate(option.plan);
       nextPlan.stops = nextPlan.stops.map((stop) => ({ ...stop }));
@@ -411,11 +478,12 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
       nextPlan.signals = nextPlan.signals ? { ...nextPlan.signals } : undefined;
       nextPlan.context = nextPlan.context ? { ...nextPlan.context } : undefined;
       nextPlan.metadata = nextPlan.metadata ? { ...nextPlan.metadata } : undefined;
+      setIsCommitted(false);
+      setIsSaved(false);
       const encoded = serializePlan(nextPlan);
-      await persistNewPlan(nextPlan, parentId);
       router.push(`/create?from=${encodeURIComponent(encoded)}`);
     },
-    [handleDismissVariations, persistNewPlan, plan.id, router]
+    [handleDismissVariations, router]
   );
 
   const hasAnchor = plan.stops.some((stop) => stop.role === 'anchor');
@@ -430,7 +498,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
           </p>
           {showCopyNotice ? (
             <p className="text-xs text-slate-400">
-              You&apos;re editing your version of this plan.
+              You’re editing your version of this plan.
             </p>
           ) : null}
           {!fromEncoded ? (
@@ -457,69 +525,75 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
           </div>
         ) : null}
 
-        {showVariations && variationOptions.length > 0 && (
-          <section className="space-y-2 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-semibold text-slate-100">Suggested variations</p>
-                <p className="text-[11px] text-slate-500">
-                  Quick tweaks before you share. Previews only.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={handleDismissVariations}
-                className={`${ctaClass('chip')} text-[11px]`}
-              >
-                Dismiss
-              </button>
-            </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {variationOptions.map((option) => (
-                <div
-                  key={option.id}
-                  className="rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 space-y-2"
-                >
-                  <p className="text-sm font-semibold text-slate-100">{option.label}</p>
-                  <p className="text-[11px] text-slate-400">{option.detail}</p>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void handleUseVariation(option)}
-                      className={`${ctaClass('primary')} text-[11px]`}
-                    >
-                      Use this
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDismissVariations}
-                      className={`${ctaClass('chip')} text-[11px]`}
-                    >
-                      Dismiss
-                    </button>
-                  </div>
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold text-slate-200">Ways to begin</h2>
+            <p className="text-[11px] text-slate-500">
+              Pick an idea to start or apply a quick tweak—it all rolls into the same plan.
+            </p>
+          </div>
+
+          {showVariations && variationOptions.length > 0 && (
+            <div className="space-y-2 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Quick tweaks for this plan</p>
+                  <p className="text-[11px] text-slate-500">Small adjustments before you share.</p>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleDismissVariations}
+                  className={`${ctaClass('chip')} text-[11px]`}
+                >
+                  Dismiss
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {variationOptions.map((option) => (
+                  <div
+                    key={option.id}
+                    className="rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 space-y-2"
+                  >
+                    <p className="text-sm font-semibold text-slate-100">{option.label}</p>
+                    <p className="text-[11px] text-slate-400">{option.detail}</p>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleUseVariation(option)}
+                        className={`${ctaClass('primary')} text-[11px]`}
+                      >
+                        Use this idea
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDismissVariations}
+                        className={`${ctaClass('chip')} text-[11px]`}
+                      >
+                        Skip
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              {PLAN_TEMPLATES.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => setPlan(createPlanFromTemplate(tpl.prefill))}
+                  className={`${ctaClass('chip')} min-w-[180px] text-left text-xs`}
+                >
+                  <div className="font-semibold text-slate-100">{tpl.label}</div>
+                  {tpl.description ? (
+                    <p className="text-[11px] text-slate-400">{tpl.description}</p>
+                  ) : null}
+                </button>
               ))}
             </div>
-          </section>
-        )}
-
-        <section className="space-y-2">
-          <h2 className="text-sm font-semibold text-slate-200">Start from a template</h2>
-          <div className="flex flex-wrap gap-2">
-            {PLAN_TEMPLATES.map((tpl) => (
-              <button
-                key={tpl.id}
-                type="button"
-                onClick={() => setPlan(createPlanFromTemplate(tpl.prefill))}
-                className={`${ctaClass('chip')} min-w-[180px] text-left text-xs`}
-              >
-                <div className="font-semibold text-slate-100">{tpl.label}</div>
-                {tpl.description ? (
-                  <p className="text-[11px] text-slate-400">{tpl.description}</p>
-                ) : null}
-              </button>
-            ))}
           </div>
         </section>
 
@@ -636,7 +710,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
                       disabled={index === 0}
                       className="rounded border border-slate-700 bg-slate-800 px-2 py-1 disabled:opacity-40"
                     >
-                      â†‘ Move up
+                      ↑ Move up
                     </button>
                     <button
                       type="button"
@@ -644,7 +718,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
                       disabled={index === plan.stops.length - 1}
                       className="rounded border border-slate-700 bg-slate-800 px-2 py-1 disabled:opacity-40"
                     >
-                      â†“ Move down
+                      ↓ Move down
                     </button>
                   </div>
 
@@ -748,13 +822,13 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
                       >
                         <option value="required">required</option>
                         <option value="flexible">flexible</option>
-                        <option value="fallback">fallback</option>
-                      </select>
-                      <p className="text-[11px] text-slate-500">
-                        Your backup move if this stop doesn&apos;t work out.
-                      </p>
-                    </div>
+                      <option value="fallback">fallback</option>
+                    </select>
+                    <p className="text-[11px] text-slate-500">
+                      Your backup move if this stop doesn’t work out.
+                    </p>
                   </div>
+                </div>
 
                   <div className="space-y-1">
                     <label className="text-sm text-slate-200" htmlFor={`stop-notes-${stop.id}`}>
@@ -777,49 +851,68 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-slate-200">Share this plan</h2>
           <div className="space-y-2">
-            <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleCommitPlan()}
+                disabled={isCommitted || commitStatus === 'saving'}
+                className={`${ctaClass('primary')} text-[11px] disabled:opacity-60`}
+              >
+                {isCommitted ? 'Plan committed' : 'Commit plan to Waypoints'}
+              </button>
               <button
                 type="button"
                 onClick={handleOpenShare}
-                className={`${ctaClass('primary')} text-[11px]`}
+                className={`${ctaClass('chip')} text-[11px]`}
                 disabled={!encodedPath}
               >
-                Open shareable view
+                Preview share link
               </button>
-            </div>
-            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={handleCopyShare}
-                className={`${ctaClass('chip')} text-[11px]`}
+                className={`${ctaClass('primary')} text-[11px]`}
                 disabled={!encodedFullUrl}
               >
-                Copy shareable link
+                Share this version
               </button>
-              {shareStatus === 'copied' && (
-                <span className="text-[11px] text-slate-200">Copied!</span>
-              )}
+              {hasShared ? (
+                <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
+                  Shared
+                </span>
+              ) : null}
             </div>
-            <p className="text-xs text-slate-400">
-              Shared links are read-only snapshots for coordinationâ€”come back anytime to edit and re-share.
-            </p>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+              {commitStatus === 'error' && <span className="text-rose-200">Commit failed. Try again.</span>}
+              {commitStatus === 'done' && <span className="text-emerald-200">Committed.</span>}
+              {shareStatus === 'copied' && <span className="text-emerald-200">Link copied.</span>}
+            </div>
           </div>
+          <p className="text-[11px] text-slate-500">
+            Drafts stay here until you commit. Only committed plans show up in Your Waypoints.
+          </p>
+          <p className="text-xs text-slate-400">
+            Shared links are read-only snapshots for coordination - come back anytime to edit and re-share.
+          </p>
           <div className="flex items-center gap-2 text-sm text-slate-200">
             <label className={`${ctaClass('chip')} gap-2 text-sm text-slate-200`}>
               <input
                 type="checkbox"
                 checked={isSaved}
+                disabled={!isCommitted}
                 onChange={(e) => {
                   const next = e.target.checked;
                   const ok = setSavedById(plan.id, next);
                   if (ok) setIsSaved(next);
-                  void persistPlan();
+                  void syncIfCommitted(plan);
                 }}
               />
               Saved
             </label>
+            {!isCommitted && (
+              <span className="text-[11px] text-slate-400">Commit first to save to Waypoints.</span>
+            )}
           </div>
           <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs space-y-1">
             {validation.issues.length === 0 ? (
@@ -833,7 +926,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
                 <ul className="space-y-1 text-slate-200">
                   {validation.issues.slice(0, 2).map((issue) => (
                     <li key={issue.code}>
-                      â€¢ {issue.message}
+                      • {issue.message}
                       {issue.path ? ` (${issue.path})` : ''}
                     </li>
                   ))}

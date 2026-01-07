@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { serializePlan, type Plan, type Stop } from '../plan-engine';
 import { ctaClass } from '../ui/cta';
@@ -21,8 +22,18 @@ type VariationEntry = {
   isOriginal: boolean;
 };
 
+type ActionProps = {
+  createCopyHref: string | null;
+  shareFullUrl: string | null;
+  onCopyShare: () => void;
+  isShared: boolean;
+  shareStatus: 'idle' | 'copied';
+};
+
 type Props = {
   plan: Plan;
+  isShared?: boolean;
+  actions?: ActionProps;
 };
 
 function StopBadges({ stop }: { stop: Stop }) {
@@ -81,11 +92,11 @@ function SignalsSection({ plan }: { plan: Plan }) {
 
   return (
     <section className="space-y-2">
-      <h2 className="text-sm font-semibold text-slate-200">Signals</h2>
+      <h2 className="text-sm font-semibold text-slate-200">Plan cues</h2>
       <ul className="space-y-1 text-sm text-slate-300">
-        {signals.vibe ? <li>Vibe: {signals.vibe}</li> : null}
-        {signals.flexibility ? <li>Flexibility: {signals.flexibility}</li> : null}
-        {signals.commitment ? <li>Commitment: {signals.commitment}</li> : null}
+        {signals.vibe ? <li>Vibe: {signals.vibe} mood</li> : null}
+        {signals.flexibility ? <li>Flexibility: {signals.flexibility} timing</li> : null}
+        {signals.commitment ? <li>Effort: {signals.commitment} commitment</li> : null}
       </ul>
     </section>
   );
@@ -117,7 +128,7 @@ function safeEncode(plan: Plan): string | null {
   }
 }
 
-function DiscoveryStrip({ plan }: { plan: Plan }) {
+function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) {
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const [isOpen, setIsOpen] = useState(false);
   const [variations, setVariations] = useState<VariationEntry[]>([]);
@@ -260,19 +271,16 @@ function DiscoveryStrip({ plan }: { plan: Plan }) {
     <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3 space-y-3">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-[11px] uppercase tracking-wide text-slate-400">Discovery</p>
+          <p className="text-[11px] uppercase tracking-wide text-slate-400">
+            {isShared ? 'Shared plan' : 'Plan preview'}
+          </p>
           <p className="text-sm text-slate-200">
             {isLoading
-              ? 'Loading variations...'
-              : variationCount <= 1
-                ? 'No variations yet.'
-                : `${variationCount} variation${variationCount === 1 ? '' : 's'} exist for this plan`}
+              ? 'Loading shared details...'
+              : isShared
+              ? 'This plan was shared with you.'
+              : 'This plan is not shared yet.'}
           </p>
-          {variationCount <= 1 && !isLoading ? (
-            <p className="text-[11px] text-slate-400">
-              Edit this plan to create your own version for comparison.
-            </p>
-          ) : null}
         </div>
         {canToggle ? (
           <div className="flex items-center gap-2">
@@ -281,7 +289,7 @@ function DiscoveryStrip({ plan }: { plan: Plan }) {
               onClick={() => setIsOpen((prev) => !prev)}
               className={`${ctaClass('chip')} text-xs`}
             >
-              {isOpen ? 'Hide variations' : 'Show variations'}
+              {isOpen ? 'Hide other versions' : 'Show other versions'}
             </button>
           </div>
         ) : null}
@@ -290,7 +298,7 @@ function DiscoveryStrip({ plan }: { plan: Plan }) {
       {isOpen && canToggle ? (
         <div className="space-y-3">
           {isLoading ? (
-            <p className="text-xs text-slate-400">Loading variations...</p>
+            <p className="text-xs text-slate-400">Loading shared versions...</p>
           ) : (
             <>
               {currentEntry ? (
@@ -330,7 +338,7 @@ function DiscoveryStrip({ plan }: { plan: Plan }) {
               ) : null}
 
               {siblingEntries.length === 0 ? (
-                <p className="text-xs text-slate-400">No variations yet.</p>
+                <p className="text-xs text-slate-400">No additional versions to show.</p>
               ) : (
                 siblingEntries.map((entry) => (
                   <div
@@ -385,29 +393,38 @@ function DiscoveryStrip({ plan }: { plan: Plan }) {
   );
 }
 
-export default function ShareablePlanView({ plan }: Props) {
+export default function ShareablePlanView({ plan, isShared = false, actions }: Props) {
   return (
     <div className="max-w-3xl mx-auto px-4 py-10 space-y-8">
-      <DiscoveryStrip plan={plan} />
-
-      <header className="space-y-2">
-        <p className="text-xs uppercase tracking-wide text-slate-400">Shared plan</p>
-        <h1 className="text-3xl font-semibold text-slate-50">{plan.title || 'Untitled plan'}</h1>
-        {plan.intent ? (
-          <p className="text-base text-slate-200">{plan.intent}</p>
-        ) : null}
-        <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100">
-          <div className="flex flex-col gap-1">
-            <span>Viewing a shared Waypoint</span>
-            <span className="text-xs text-slate-400">Edit to create your copy.</span>
+      <header className="space-y-3">
+        {isShared ? (
+          <div className="flex flex-col gap-1 rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
+                Shared
+              </span>
+              <p className="text-sm font-semibold text-emerald-50">This plan was shared with you.</p>
+            </div>
+            <p className="text-[11px] text-emerald-100">Editing will create your own version.</p>
           </div>
-        </div>
-        {plan.audience ? (
-          <span className="inline-block mt-2 text-xs px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-200">
-            {plan.audience}
-          </span>
         ) : null}
+        <div className="space-y-2">
+          <p className="text-xs uppercase tracking-wide text-slate-400">
+            {isShared ? 'Shared plan' : 'Plan preview'}
+          </p>
+          <h1 className="text-3xl font-semibold text-slate-50">{plan.title || 'Untitled plan'}</h1>
+          {plan.intent ? (
+            <p className="text-base text-slate-200">{plan.intent}</p>
+          ) : null}
+          {plan.audience ? (
+            <span className="inline-block mt-2 text-xs px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-200">
+              {plan.audience}
+            </span>
+          ) : null}
+        </div>
       </header>
+
+      <DiscoveryStrip plan={plan} isShared={isShared} />
 
       <section className="space-y-3">
         <h2 className="text-sm font-semibold text-slate-200">Stops</h2>
@@ -439,6 +456,35 @@ export default function ShareablePlanView({ plan }: Props) {
       <ConstraintsSection plan={plan} />
       <SignalsSection plan={plan} />
       <FooterSection plan={plan} />
-    </div>
+
+      {actions?.createCopyHref ? (
+        <div className="pt-4 border-t border-slate-800 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Link href={actions.createCopyHref} className={ctaClass('chip')}>
+              Edit
+            </Link>
+            <button
+              type="button"
+              onClick={actions.onCopyShare}
+              disabled={!actions.shareFullUrl}
+              className={`${ctaClass('primary')} text-[11px]`}
+            >
+              Share this version
+            </button>
+            {actions.isShared ? (
+              <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
+                Shared
+              </span>
+            ) : null}
+            {actions.shareStatus === 'copied' ? (
+              <span className="text-[11px] text-emerald-200">Link copied.</span>
+            ) : null}
+        </div>
+        <p className="text-[11px] text-slate-400">
+          Editing creates your own version. The original won’t change.
+        </p>
+      </div>
+    ) : null}
+  </div>
   );
 }
