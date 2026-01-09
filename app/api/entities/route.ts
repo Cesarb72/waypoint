@@ -1,14 +1,14 @@
 // app/api/entities/route.ts
 
 import { NextResponse } from 'next/server';
-import { entities, type Entity } from '@/data/entities';
+import { ENTITIES, type Entity } from '@/data/entities';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const q = (searchParams.get('q') ?? '').trim().toLowerCase();
 
   // We’re ignoring lat/lng for now – they can be wired later.
-  let results: Entity[] = entities;
+  let results: Entity[] = ENTITIES;
 
   if (q) {
     results = results.filter((entity) => {
@@ -17,5 +17,5 @@ export async function GET(request: Request) {
     });
   }
 
-  return NextResponse.json({ entities: results });
+  return NextResponse.json({ ENTITIES: results });
 }
