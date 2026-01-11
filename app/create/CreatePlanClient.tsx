@@ -1,33 +1,45 @@
-'use client';
+﻿'use client';
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   createEmptyPlan,
   createPlanFromTemplate,
   deserializePlan,
   serializePlan,
   type Plan,
+  type PlanOrigin,
+  type PlanOriginKind,
   type Stop,
   validatePlan,
 } from '../plan-engine';
 import {
   getPlansIndex,
-  setSavedById,
   upsertRecentPlan,
   isPlanShared,
   markPlanShared,
+  loadOrigin,
+  saveOrigin,
 } from '../utils/planStorage';
 import { PLAN_TEMPLATES } from '../templates/planTemplates';
 import { ctaClass } from '../ui/cta';
 import { getSupabaseBrowserClient } from '../lib/supabaseBrowserClient';
+import type { Origin } from '../plan-engine/origin';
+import { loadDiscoverySession } from '@/lib/discoveryStorage';
 
 type Props = {
   fromEncoded?: string;
   sourceTitle?: string;
   sourceEncoded?: string;
   originUrl?: string;
+  initialOrigin?: {
+    entityId?: string;
+    entityName?: string;
+    query?: string;
+    mood?: string;
+    source?: string;
+  };
 };
 
 type VariationOption = {
@@ -37,9 +49,121 @@ type VariationOption = {
   plan: Plan;
 };
 
-export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncoded, originUrl }: Props) {
+function formatMoodLabel(mood: string): string {
+  if (!mood) return mood;
+  return mood.charAt(0).toUpperCase() + mood.slice(1);
+}
+
+function generateOriginSessionId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `origin_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function decodeParam(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function deriveOriginFromParams(fromParam: string | null, originSourceParam: string | null): Origin {
+  const createdAt = Date.now();
+  const sessionId = generateOriginSessionId();
+
+  if (fromParam) {
+    return {
+      type: 'shared',
+      label: 'Shared plan',
+      source: fromParam,
+      createdAt,
+      sessionId,
+    };
+  }
+
+  if (originSourceParam) {
+    const decoded = decodeParam(originSourceParam);
+    return {
+      type: 'search',
+      label: `Search — ${decoded}`,
+      source: originSourceParam,
+      createdAt,
+      sessionId,
+    };
+  }
+
+  return {
+    type: 'create',
+    label: 'New plan',
+    createdAt,
+    sessionId,
+  };
+}
+
+function isSameOrigin(a: Origin, b: Origin): boolean {
+  return (
+    a.type === b.type &&
+    a.label === b.label &&
+    a.source === b.source &&
+    a.createdAt === b.createdAt &&
+    a.sessionId === b.sessionId
+  );
+}
+
+function buildOriginFromContext(context: {
+  query?: string;
+  mood?: string;
+  source?: PlanOriginKind;
+  entityId?: string;
+  label?: string;
+}): PlanOrigin | null {
+  if (context.source === 'surprise') {
+    return { kind: 'surprise' };
+  }
+  if (context.source === 'template') {
+    return { kind: 'template', label: context.label };
+  }
+  if (context.query) {
+    return {
+      kind: 'search',
+      query: context.query,
+      mood: context.mood,
+      entityId: context.entityId,
+      label: context.label,
+    };
+  }
+  if (context.mood) {
+    return {
+      kind: 'mood',
+      mood: context.mood,
+      entityId: context.entityId,
+      label: context.label,
+    };
+  }
+  if (context.entityId || context.label) {
+    return {
+      kind: 'search',
+      entityId: context.entityId,
+      label: context.label,
+    };
+  }
+  return null;
+}
+
+export default function CreatePlanClient({
+  fromEncoded,
+  sourceTitle,
+  sourceEncoded,
+  originUrl,
+  initialOrigin,
+}: Props) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  const fromParam = searchParams.get('from');
+  const originSourceParam = searchParams.get('originSource');
   const [plan, setPlan] = useState<Plan>(() =>
     createEmptyPlan({
       title: 'New plan',
@@ -52,6 +176,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
   const [isSaved, setIsSaved] = useState(false);
   const [isCommitted, setIsCommitted] = useState(false);
   const [commitStatus, setCommitStatus] = useState<'idle' | 'saving' | 'done' | 'error'>('idle');
+  const [origin, setOrigin] = useState<Origin | null>(() => loadOrigin());
   const [userId, setUserId] = useState<string | null>(null);
   const [sourceExistsInSupabase, setSourceExistsInSupabase] = useState(false);
   const [sourceOwnedByUser, setSourceOwnedByUser] = useState(false);
@@ -60,10 +185,190 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
   const [variationOptions, setVariationOptions] = useState<VariationOption[]>([]);
   const [showVariations, setShowVariations] = useState(false);
   const hasPrefilledFromSource = useRef(false);
+  const originInitRef = useRef(false);
+  const originStableRef = useRef<Origin | null>(origin);
+
+  const discoveryContext = useMemo<{
+    query?: string;
+    mood?: string;
+    source?: PlanOriginKind;
+    entityId?: string;
+    label?: string;
+  }>(() => {
+    const query = searchParams.get('q')?.trim() || undefined;
+    const mood = searchParams.get('mood')?.trim() || undefined;
+    const sourceRaw = searchParams.get('source')?.trim() || undefined;
+    const source: PlanOriginKind | undefined =
+      sourceRaw === 'search' ||
+      sourceRaw === 'surprise' ||
+      sourceRaw === 'template' ||
+      sourceRaw === 'mood'
+        ? sourceRaw
+        : undefined;
+    const entityId = searchParams.get('entityId')?.trim() || undefined;
+    const label = searchParams.get('name')?.trim() || undefined;
+    return {
+      query,
+      mood: mood && mood !== 'all' ? mood : undefined,
+      source,
+      entityId,
+      label,
+    };
+  }, [searchParams]);
+
+  const setOriginOnce = useCallback((nextOrigin: Origin) => {
+    if (loadOrigin()) return;
+    saveOrigin(nextOrigin);
+  }, []);
+
+  const backToSearchHref = useMemo(() => {
+    if (initialOrigin?.source !== 'home_search') return null;
+    const session = loadDiscoverySession();
+    if (session) {
+      return `${session.path}${session.queryString}`;
+    }
+    return '/';
+  }, [initialOrigin?.source]);
+
+  useEffect(() => {
+    if (originInitRef.current) return;
+    originInitRef.current = true;
+    if (origin) return;
+    const nextOrigin = deriveOriginFromParams(fromParam, originSourceParam);
+    setOriginOnce(nextOrigin);
+    setOrigin(loadOrigin());
+  }, [fromParam, origin, originSourceParam, setOriginOnce]);
+
+  useEffect(() => {
+    if (!origin) return;
+    if (!originStableRef.current) {
+      originStableRef.current = origin;
+      return;
+    }
+    if (!isSameOrigin(originStableRef.current, origin)) {
+      console.warn('[Origin] Unexpected change post-init', {
+        previous: originStableRef.current,
+        next: origin,
+      });
+    }
+  }, [origin]);
+
+  const discoveryContextLine = useMemo(() => {
+    const origin = plan.meta?.origin ?? plan.origin;
+    if (!origin) return null;
+    if (origin.kind === 'surprise') {
+      return 'Generated via Surprise Me';
+    }
+    if (origin.kind === 'template') {
+      return 'Started from a template';
+    }
+    if (origin.kind === 'search' && origin.label) {
+      return `From search: ${origin.label}`;
+    }
+    if (origin.kind === 'search' && origin.query) {
+      return `Started from search: "${origin.query}"`;
+    }
+    if (origin.kind === 'mood' && origin.mood) {
+      return `Started from mood: ${formatMoodLabel(origin.mood)}`;
+    }
+    if (origin.label) {
+      return `Started from: ${origin.label}`;
+    }
+    return null;
+  }, [plan.meta]);
+
+  const waysToBeginContext = useMemo(() => {
+    if (discoveryContext.query) {
+      return `Suggestions based on "${discoveryContext.query}"`;
+    }
+    if (discoveryContext.mood) {
+      return `Suggestions for a ${formatMoodLabel(discoveryContext.mood)} mood`;
+    }
+    return null;
+  }, [discoveryContext.mood, discoveryContext.query]);
 
   useEffect(() => {
     setHasShared(isPlanShared(plan.id));
   }, [plan.id]);
+
+  useEffect(() => {
+    if (fromParam) return;
+    if (fromEncoded) return;
+
+    const hasOriginSource =
+      initialOrigin?.entityId ||
+      initialOrigin?.entityName ||
+      initialOrigin?.query ||
+      initialOrigin?.mood ||
+      initialOrigin?.source;
+    const hasDiscoverySource =
+      discoveryContext.query ||
+      discoveryContext.mood ||
+      discoveryContext.source ||
+      discoveryContext.entityId ||
+      discoveryContext.label;
+
+    if (!hasOriginSource && !hasDiscoverySource) return;
+
+    setPlan((prev) => {
+      if (prev.meta?.origin || prev.origin) {
+        return prev;
+      }
+
+      const origin =
+        initialOrigin && hasOriginSource
+          ? buildOriginFromContext({
+              entityId: initialOrigin.entityId,
+              label: initialOrigin.entityName,
+              query: initialOrigin.query,
+              mood: initialOrigin.mood,
+              source:
+                initialOrigin.source === 'home_search'
+                  ? 'search'
+                  : (initialOrigin.source as PlanOriginKind | undefined),
+            })
+          : buildOriginFromContext(discoveryContext);
+
+      if (!origin) return prev;
+
+      const isDefaultTitle = !prev.title || prev.title.trim() === '' || prev.title === 'New plan';
+      const nextTitle = isDefaultTitle
+        ? initialOrigin?.entityName || origin.label || prev.title
+        : prev.title;
+
+      return {
+        ...prev,
+        title: nextTitle,
+        meta: {
+          ...(prev.meta ?? {}),
+          origin,
+        },
+        origin,
+      };
+    });
+  }, [
+    discoveryContext.entityId,
+    discoveryContext.label,
+    discoveryContext.mood,
+    discoveryContext.query,
+    discoveryContext.source,
+    fromEncoded,
+    initialOrigin,
+    fromParam,
+  ]);
+
+  useEffect(() => {
+    if (!fromParam) return;
+    if (originSourceParam !== 'home_search') return;
+    try {
+      const decoded = deserializePlan(fromParam);
+      setPlan(decoded);
+      setPlanHydratedFromSource(true);
+      hasPrefilledFromSource.current = false;
+    } catch {
+      // ignore invalid payloads
+    }
+  }, [fromParam, originSourceParam]);
 
   function clonePlanForVariation(base: Plan): Plan {
     const cloned = createPlanFromTemplate(base);
@@ -72,6 +377,8 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
     cloned.signals = cloned.signals ? { ...cloned.signals } : undefined;
     cloned.context = cloned.context ? { ...cloned.context } : undefined;
     cloned.metadata = cloned.metadata ? { ...cloned.metadata } : undefined;
+    cloned.meta = cloned.meta ? { ...cloned.meta } : undefined;
+    cloned.origin = cloned.origin ? { ...cloned.origin } : undefined;
     return cloned;
   }
 
@@ -174,6 +481,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
   }, [plan.id]);
   useEffect(() => {
     if (!fromEncoded) return;
+    if (originSourceParam === 'home_search') return;
     setSourceExistsInSupabase(false);
     setSourceOwnedByUser(false);
     let cancelled = false;
@@ -210,7 +518,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
     return () => {
       cancelled = true;
     };
-  }, [fromEncoded, sourcePlanId, supabase, userId]);
+  }, [fromEncoded, originSourceParam, sourcePlanId, supabase, userId]);
 
   useEffect(() => {
     if (!fromEncoded) {
@@ -478,6 +786,8 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
       nextPlan.signals = nextPlan.signals ? { ...nextPlan.signals } : undefined;
       nextPlan.context = nextPlan.context ? { ...nextPlan.context } : undefined;
       nextPlan.metadata = nextPlan.metadata ? { ...nextPlan.metadata } : undefined;
+      nextPlan.meta = nextPlan.meta ? { ...nextPlan.meta } : undefined;
+      nextPlan.origin = nextPlan.origin ? { ...nextPlan.origin } : undefined;
       setIsCommitted(false);
       setIsSaved(false);
       const encoded = serializePlan(nextPlan);
@@ -492,17 +802,30 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
     <main className="min-h-screen bg-slate-950 text-slate-50 px-4 py-8">
       <div className="max-w-2xl mx-auto space-y-8">
         <header className="space-y-1">
-          <h1 className="text-2xl font-semibold">Create a Waypoint</h1>
+          <h1 className="text-2xl font-semibold">Start a plan</h1>
           <p className="text-sm text-slate-400">
-            Draft a shareable plan your crew can react to; everything here is a safe, revisable draft.
+            Add a few stops, then save and share when it feels right.
           </p>
+          <p className="text-xs text-slate-500">From: {origin?.label ?? 'This plan'}</p>
           {showCopyNotice ? (
             <p className="text-xs text-slate-400">
-              You’re editing your version of this plan.
+              You're editing your version of this plan.
             </p>
+          ) : null}
+          {discoveryContextLine ? (
+            <p className="text-xs text-slate-500">{discoveryContextLine}</p>
           ) : null}
           {!fromEncoded ? (
             <p className="text-xs text-slate-500">You're editing your Waypoint.</p>
+          ) : null}
+          {backToSearchHref ? (
+            <Link
+              href={backToSearchHref}
+              scroll={false}
+              className="inline-flex items-center gap-1 rounded-full border border-slate-700/80 bg-slate-900/70 px-2 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500 hover:text-slate-50"
+            >
+              ← Back to search results
+            </Link>
           ) : null}
         </header>
 
@@ -529,7 +852,8 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
           <div className="space-y-1">
             <h2 className="text-sm font-semibold text-slate-200">Ways to begin</h2>
             <p className="text-[11px] text-slate-500">
-              Pick an idea to start or apply a quick tweak—it all rolls into the same plan.
+              {waysToBeginContext ??
+                'Pick an idea to start or apply a quick tweak— it all rolls into the same plan.'}
             </p>
           </div>
 
@@ -584,7 +908,21 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
                 <button
                   key={tpl.id}
                   type="button"
-                  onClick={() => setPlan(createPlanFromTemplate(tpl.prefill))}
+                  onClick={() => {
+                    const next = createPlanFromTemplate(tpl.prefill);
+                    const origin = {
+                      kind: 'template' as const,
+                      query: discoveryContext.query,
+                      mood: discoveryContext.mood,
+                      label: tpl.label,
+                    };
+                    next.meta = {
+                      ...next.meta,
+                      origin,
+                    };
+                    next.origin = origin;
+                    setPlan(next);
+                  }}
                   className={`${ctaClass('chip')} min-w-[180px] text-left text-xs`}
                 >
                   <div className="font-semibold text-slate-100">{tpl.label}</div>
@@ -852,6 +1190,11 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
 
         <section className="space-y-3">
           <div className="space-y-2">
+            {!isCommitted && (
+              <div className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[11px] text-slate-300">
+                Not saved yet
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -859,7 +1202,7 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
                 disabled={isCommitted || commitStatus === 'saving'}
                 className={`${ctaClass('primary')} text-[11px] disabled:opacity-60`}
               >
-                {isCommitted ? 'Plan committed' : 'Commit plan to Waypoints'}
+                {isCommitted ? 'Saved' : 'Save plan to Waypoints'}
               </button>
               <button
                 type="button"
@@ -884,36 +1227,17 @@ export default function CreatePlanClient({ fromEncoded, sourceTitle, sourceEncod
               ) : null}
             </div>
             <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-              {commitStatus === 'error' && <span className="text-rose-200">Commit failed. Try again.</span>}
-              {commitStatus === 'done' && <span className="text-emerald-200">Committed.</span>}
+              {commitStatus === 'error' && <span className="text-rose-200">Save failed. Try again.</span>}
+              {commitStatus === 'done' && <span className="text-emerald-200">Saved.</span>}
               {shareStatus === 'copied' && <span className="text-emerald-200">Link copied.</span>}
             </div>
           </div>
           <p className="text-[11px] text-slate-500">
-            Drafts stay here until you commit. Only committed plans show up in Your Waypoints.
+            This plan will appear in Your Waypoints once you commit it.
           </p>
           <p className="text-xs text-slate-400">
             Shared links are read-only snapshots for coordination - come back anytime to edit and re-share.
           </p>
-          <div className="flex items-center gap-2 text-sm text-slate-200">
-            <label className={`${ctaClass('chip')} gap-2 text-sm text-slate-200`}>
-              <input
-                type="checkbox"
-                checked={isSaved}
-                disabled={!isCommitted}
-                onChange={(e) => {
-                  const next = e.target.checked;
-                  const ok = setSavedById(plan.id, next);
-                  if (ok) setIsSaved(next);
-                  void syncIfCommitted(plan);
-                }}
-              />
-              Saved
-            </label>
-            {!isCommitted && (
-              <span className="text-[11px] text-slate-400">Commit first to save to Waypoints.</span>
-            )}
-          </div>
           <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs space-y-1">
             {validation.issues.length === 0 ? (
               <div className="text-emerald-200 font-semibold">Ready to share</div>

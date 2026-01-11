@@ -44,6 +44,21 @@ export interface Metadata {
   lastUpdated?: string;
 }
 
+export type PlanOriginKind = 'search' | 'mood' | 'surprise' | 'template';
+
+export interface PlanOrigin {
+  kind: PlanOriginKind;
+  query?: string;
+  mood?: string;
+  entityId?: string;
+  label?: string;
+  source?: string;
+}
+
+export interface PlanMeta {
+  origin?: PlanOrigin;
+}
+
 // The doc references Location and Duration but does not define their shapes; keep them flexible.
 export type Location = string;
 export type Duration = string;
@@ -70,6 +85,8 @@ export interface PlanObject {
   context?: Context;
   presentation?: Presentation;
   metadata?: Metadata;
+  meta?: PlanMeta;
+  origin?: PlanOrigin;
   ownerId?: string;
   originStarterId?: string;
   state?: PlanState;

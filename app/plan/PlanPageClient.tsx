@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   upsertPlan,
@@ -52,6 +52,9 @@ export default function PlanPage() {
   const [plan, setPlan] = useState<PlanDraft | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const loggedRouteRef = useRef(false);
+  const loggedPlanRef = useRef<string | null>(null);
+  const loggedOriginPlanRef = useRef<string | null>(null);
 
   // Validation state
   const [hasTriedSubmit, setHasTriedSubmit] = useState(false);
@@ -106,6 +109,45 @@ export default function PlanPage() {
 
     setInitialized(true);
   }, [initialized, urlPlanId, waypointName]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return;
+    if (loggedRouteRef.current) return;
+    loggedRouteRef.current = true;
+    console.log('[origin2] plan route mounted', {
+      pathname: typeof window !== 'undefined' ? window.location.pathname : '/plan',
+      searchParams: params.toString(),
+      planId: urlPlanId ?? null,
+    });
+  }, [params, urlPlanId]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return;
+    if (!plan) return;
+    const logKey = planId ?? 'new';
+    if (loggedPlanRef.current === logKey) return;
+    loggedPlanRef.current = logKey;
+    const planAny = plan as unknown as { meta?: { origin?: unknown }; origin?: unknown };
+    console.log('[origin2] editor loaded plan', {
+      planId: planId ?? null,
+      origin: planAny.meta?.origin ?? planAny.origin ?? null,
+    });
+  }, [plan, planId]);
+
+  useEffect(() => {
+    if (!plan) return;
+    const logKey = planId ?? 'new';
+    if (loggedOriginPlanRef.current === logKey) return;
+    loggedOriginPlanRef.current = logKey;
+    const planAny = plan as unknown as {
+      meta?: { origin?: unknown };
+      origin?: unknown;
+    };
+    console.log('[origin2] editor loaded', {
+      planId: planId ?? null,
+      origin: planAny.meta?.origin ?? planAny.origin ?? null,
+    });
+  }, [plan, planId]);
 
   function updateField<K extends keyof PlanDraft>(key: K, value: PlanDraft[K]) {
     setPlan((prev) => (prev ? { ...prev, [key]: value } : prev));

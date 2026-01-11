@@ -64,6 +64,8 @@ export function createPlanFromTemplate(templatePlan: Partial<Plan>): Plan {
       createdAt: timestamp,
       lastUpdated: timestamp,
     },
+    meta: templatePlan.meta ? { ...templatePlan.meta } : undefined,
+    origin: templatePlan.origin ? { ...templatePlan.origin } : undefined,
     constraints: templatePlan.constraints,
     signals: templatePlan.signals,
     context: templatePlan.context,

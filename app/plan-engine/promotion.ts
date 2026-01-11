@@ -46,6 +46,8 @@ export function promoteStarterToPlan(starter: PlanStarter, ownerId: string): Pla
           createdAt: timestamp,
           lastUpdated: timestamp,
         },
+    meta: seed.meta ? { ...seed.meta } : undefined,
+    origin: seed.origin ? { ...seed.origin } : undefined,
     ownerId,
     originStarterId: starter.id,
     state: 'DRAFT' satisfies PlanState,

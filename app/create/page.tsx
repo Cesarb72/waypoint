@@ -28,6 +28,24 @@ export default async function Page({ searchParams }: PageProps) {
   const originParam = sp?.origin;
   const originUrl = sanitizeOrigin(Array.isArray(originParam) ? originParam[0] : originParam);
   let sourceTitle: string | undefined;
+  const originEntityId = Array.isArray(sp?.originEntityId)
+    ? sp?.originEntityId[0]
+    : sp?.originEntityId;
+  const originEntityName = Array.isArray(sp?.originEntityName)
+    ? sp?.originEntityName[0]
+    : sp?.originEntityName;
+  const originQuery = Array.isArray(sp?.originQuery) ? sp?.originQuery[0] : sp?.originQuery;
+  const originMood = Array.isArray(sp?.originMood) ? sp?.originMood[0] : sp?.originMood;
+  const originSource = Array.isArray(sp?.originSource)
+    ? sp?.originSource[0]
+    : sp?.originSource;
+  const initialOrigin = {
+    entityId: originEntityId,
+    entityName: originEntityName,
+    query: originQuery,
+    mood: originMood,
+    source: originSource,
+  };
 
   if (fromEncoded) {
     try {
@@ -50,6 +68,7 @@ export default async function Page({ searchParams }: PageProps) {
         sourceTitle={sourceTitle}
         sourceEncoded={fromEncoded}
         originUrl={originUrl}
+        initialOrigin={initialOrigin}
       />
     </>
   );

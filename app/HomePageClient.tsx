@@ -14,6 +14,10 @@ import { searchEntities } from '@/lib/searchEntities';
 import type { StoredPlan } from '@/lib/planStorage';
 import { loadPlans, deletePlan, clearPlans } from '@/lib/planStorage';
 import {
+  loadDiscoverySession,
+  saveDiscoverySession,
+} from '@/lib/discoveryStorage';
+import {
   loadSavedWaypoints,
   saveWaypointFromEntity,
   removeSavedWaypoint,
@@ -25,6 +29,7 @@ import {
   deserializePlan,
   serializePlan,
   type Plan,
+  type Stop,
   v6Starters,
 } from './plan-engine';
 import type { PlanStarter } from './plan-engine';
@@ -97,6 +102,59 @@ function labelUseCase(u: UseCaseTag): string {
   }
 }
 
+function formatMoodLabel(mood: Mood): string {
+  return mood.charAt(0).toUpperCase() + mood.slice(1);
+}
+
+function buildDiscoverySignal(options: {
+  query: string;
+  moodFilter: Mood | 'all';
+  name: string;
+  description?: string;
+  location?: string;
+  tags?: string[];
+  entityMood?: Mood;
+  isSaved: boolean;
+}): string | null {
+  const trimmedQuery = options.query.trim();
+  const queryLower = trimmedQuery.toLowerCase();
+  const haystack = [
+    options.name,
+    options.description,
+    options.location,
+    options.tags?.join(' '),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (trimmedQuery && haystack) {
+    const queryWords = queryLower
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter((word) => word.length >= 3);
+    const matchesQuery =
+      haystack.includes(queryLower) || queryWords.some((word) => haystack.includes(word));
+    if (matchesQuery) {
+      return `Matches your search: "${trimmedQuery}"`;
+    }
+  }
+
+  if (options.moodFilter !== 'all' && options.entityMood === options.moodFilter) {
+    return `Matches mood: ${formatMoodLabel(options.moodFilter)}`;
+  }
+
+  if (options.isSaved) {
+    return 'Matches saved interest';
+  }
+
+  if (options.moodFilter !== 'all') {
+    return 'Fits your filters';
+  }
+
+  return null;
+}
+
 export default function HomePageClient() {
   const router = useRouter();
   const pathname = usePathname();
@@ -128,9 +186,12 @@ export default function HomePageClient() {
   const [supabaseLoading, setSupabaseLoading] = useState(false);
   const [migrationMessage, setMigrationMessage] = useState<string | null>(null);
   const authPanelRef = useRef<HTMLDivElement | null>(null);
+  const discoveryScrollTimeoutRef = useRef<number | null>(null);
+  const discoverySnapshotRef = useRef<{ path: string; queryString: string } | null>(null);
+  const discoveryScrollRestoredRef = useRef(false);
+  const discoveryActiveRef = useRef(false);
 
-  // Try to get browser geolocation once on mount
-  useEffect(() => {
+  function requestLocation() {
     if (typeof window === 'undefined' || !('geolocation' in navigator)) {
       return;
     }
@@ -149,7 +210,7 @@ export default function HomePageClient() {
         setLocationStatus('denied');
       }
     );
-  }, []);
+  }
 
   // Load recent plans once on mount
   useEffect(() => {
@@ -296,20 +357,84 @@ export default function HomePageClient() {
   //  Filters from URL (this is the actual query sent to the API & search)
   const queryFromUrl = searchParams.get('q') ?? '';
 
+  const discoveryQueryString = useMemo(() => {
+    const raw = searchParams.toString();
+    return raw ? `?${raw}` : '';
+  }, [searchParams]);
+
   const moodFromUrlRaw =
     (searchParams.get('mood') as Mood | 'all' | null) ?? 'all';
   const moodFromUrl: Mood | 'all' = MOOD_OPTIONS.includes(moodFromUrlRaw)
     ? moodFromUrlRaw
     : 'all';
+  const hasDiscoveryContext = queryFromUrl.trim().length > 0 || moodFromUrl !== 'all';
 
   //  Local UX state: "What" and "Where" inputs
   const [whatInput, setWhatInput] = useState(queryFromUrl);
   const [whereInput, setWhereInput] = useState('');
+  const resultOrderCacheRef = useRef<Map<string, string[]>>(new Map());
 
   // Keep "what" in sync if URL changes (back/forward, surprise, etc.)
   useEffect(() => {
     setWhatInput(queryFromUrl);
   }, [queryFromUrl]);
+
+  useEffect(() => {
+    discoverySnapshotRef.current = {
+      path: pathname || '/',
+      queryString: discoveryQueryString,
+    };
+  }, [discoveryQueryString, pathname]);
+
+  useEffect(() => {
+    discoveryActiveRef.current = hasDiscoveryContext;
+    if (typeof window === 'undefined') return;
+    if (!hasDiscoveryContext) return;
+    const existing = loadDiscoverySession();
+    const nextSession = {
+      path: pathname || '/',
+      queryString: discoveryQueryString,
+      createdAt: Date.now(),
+    };
+    const nextScrollY =
+      existing &&
+      existing.queryString === nextSession.queryString &&
+      window.scrollY === 0 &&
+      existing.scrollY > 0
+        ? existing.scrollY
+        : window.scrollY;
+    saveDiscoverySession({
+      ...nextSession,
+      scrollY: nextScrollY,
+    });
+  }, [discoveryQueryString, hasDiscoveryContext, pathname]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleScroll = () => {
+      if (discoveryScrollTimeoutRef.current) {
+        window.clearTimeout(discoveryScrollTimeoutRef.current);
+      }
+      discoveryScrollTimeoutRef.current = window.setTimeout(() => {
+        if (!discoveryActiveRef.current) return;
+        const snapshot = discoverySnapshotRef.current;
+        if (!snapshot) return;
+        saveDiscoverySession({
+          path: snapshot.path,
+          queryString: snapshot.queryString,
+          scrollY: window.scrollY,
+          createdAt: Date.now(),
+        });
+      }, 200);
+    };
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      if (discoveryScrollTimeoutRef.current) {
+        window.clearTimeout(discoveryScrollTimeoutRef.current);
+      }
+    };
+  }, []);
 
   function updateSearchParams(next: { q?: string; mood?: Mood | 'all' }) {
     const params = new URLSearchParams(searchParams.toString());
@@ -390,30 +515,94 @@ export default function HomePageClient() {
 
   //  Centralized search logic (text + tags + mood)
   const filteredEntities = useMemo(
-    () =>
-      searchEntities(data, {
+    () => {
+      const results = searchEntities(data, {
         query: queryFromUrl, // use whatever is in the search bar / URL
         mood: moodFromUrl,
-      }),
+      });
+
+      const key = `${queryFromUrl.trim().toLowerCase()}|${moodFromUrl}`;
+      const cached = resultOrderCacheRef.current.get(key);
+      if (!cached) {
+        resultOrderCacheRef.current.set(
+          key,
+          results.map((entity) => entity.id)
+        );
+        return results;
+      }
+
+      const rank = new Map(cached.map((id, index) => [id, index]));
+      return [...results].sort((a, b) => {
+        const aRank = rank.get(a.id);
+        const bRank = rank.get(b.id);
+        if (aRank === undefined && bRank === undefined) return 0;
+        if (aRank === undefined) return 1;
+        if (bRank === undefined) return -1;
+        return aRank - bRank;
+      });
+    },
     [data, moodFromUrl, queryFromUrl]
   );
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (discoveryScrollRestoredRef.current) return;
+    if (isLoading || error) return;
+    if (!hasDiscoveryContext || filteredEntities.length === 0) return;
+    const session = loadDiscoverySession();
+    if (!session) return;
+    if (session.path !== (pathname || '/')) return;
+    if (session.queryString !== discoveryQueryString) return;
+    discoveryScrollRestoredRef.current = true;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: session.scrollY, left: 0, behavior: 'auto' });
+      });
+    });
+  }, [discoveryQueryString, error, filteredEntities.length, hasDiscoveryContext, isLoading, pathname]);
+
   //  Navigate into planning flow WITH a snapshot of the entity
   function goToPlanForEntity(entity: Entity) {
+    const nextPlan = createEmptyPlan({
+      title: entity.name ?? 'New plan',
+      intent: 'What do we want to accomplish?',
+      audience: 'me-and-friends',
+    });
+
+    const origin = {
+      kind: 'search' as const,
+      query: queryFromUrl || undefined,
+      mood: moodFromUrl !== 'all' ? moodFromUrl : undefined,
+      entityId: entity.id,
+      label: entity.name,
+    };
+
+    nextPlan.origin = origin;
+    nextPlan.meta = {
+      ...(nextPlan.meta ?? {}),
+      origin,
+    };
+
+    const stopId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `stop_${Math.random().toString(36).slice(2, 8)}`;
+    const anchorStop: Stop = {
+      id: stopId,
+      name: entity.name ?? 'Anchor stop',
+      role: 'anchor',
+      optionality: 'required',
+      location: entity.location ?? entity.description,
+      notes: 'Picked from search results.',
+    };
+    nextPlan.stops = [anchorStop];
+
+    const encoded = serializePlan(nextPlan);
     const params = new URLSearchParams();
-
-    params.set('entityId', entity.id);
-    if (queryFromUrl) params.set('q', queryFromUrl);
-
-    params.set('name', entity.name);
-    if (entity.description) {
-      params.set('description', entity.description);
-    }
-    if (entity.mood) {
-      params.set('mood', entity.mood);
-    }
-
-    router.push(`/create?${params.toString()}`);
+    params.set('from', encoded);
+    params.set('originSource', 'home_search');
+    const href = `/create?${params.toString()}`;
+    router.push(href);
   }
 
   //  When user clicks "Plan this"
@@ -466,7 +655,7 @@ export default function HomePageClient() {
     if (!surprisePlan) return;
     try {
       const encoded = serializePlan(surprisePlan);
-      router.push(`/create?from=${encodeURIComponent(encoded)}`);
+      router.push(`/create?from=${encodeURIComponent(encoded)}&source=surprise`);
     } catch {
       setSurpriseError('Could not open this plan. Please try again.');
     }
@@ -1020,7 +1209,9 @@ export default function HomePageClient() {
           {userId && supabaseLoading ? (
             <p className="text-xs text-slate-400">Loading your Waypoints...</p>
           ) : recentV2Plans.length === 0 ? (
-            <p className="text-xs text-slate-400">No Waypoints yet. Create or share one to see it here.</p>
+            <p className="text-xs text-slate-400">
+              No Waypoints yet. Try searching, then plan or share a result to populate this list.
+            </p>
           ) : (
             <ul className="space-y-2">
               {recentV2Plans.map((plan) => (
@@ -1338,11 +1529,13 @@ export default function HomePageClient() {
         <section className="space-y-3">
           {/* What + Search */}
           <div className="flex flex-col gap-2">
-            <label className="text-xs font-medium text-slate-300">
+            <label className="text-xs font-medium text-slate-300" htmlFor="home-what">
               What are you looking for?
             </label>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <input
+                id="home-what"
+                name="q"
                 type="text"
                 placeholder="e.g. cheap date, cozy bar, birthday dinner, friends night"
                 value={whatInput}
@@ -1370,13 +1563,15 @@ export default function HomePageClient() {
           {/* Where + Mood + Surprise */}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="flex-1 flex flex-col gap-2">
-              <label className="text-xs font-medium text-slate-300">
+              <label className="text-xs font-medium text-slate-300" htmlFor="home-where">
                 Where?
                 <span className="ml-1 text-[10px] font-normal text-slate-500">
                   (optional  city, neighborhood, state)
                 </span>
               </label>
               <input
+                id="home-where"
+                name="where"
                 type="text"
                 placeholder="e.g. near me, San Jose, downtown"
                 value={whereInput}
@@ -1388,11 +1583,27 @@ export default function HomePageClient() {
                 }}
                 className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
               />
+              <button
+                type="button"
+                onClick={requestLocation}
+                className="self-start text-[11px] text-slate-400 hover:text-slate-200"
+                disabled={locationStatus === 'requesting'}
+              >
+                {locationStatus === 'available'
+                  ? 'Using your location'
+                  : locationStatus === 'requesting'
+                  ? 'Requesting location...'
+                  : 'Use my location'}
+              </button>
             </div>
 
             <div className="flex flex-col gap-2 sm:w-40">
-              <label className="text-xs font-medium text-slate-300">Mood</label>
+              <label className="text-xs font-medium text-slate-300" htmlFor="home-mood">
+                Mood
+              </label>
               <select
+                id="home-mood"
+                name="mood"
                 value={moodFromUrl}
                 onChange={(e) => {
                   updateSearchParams({ mood: e.target.value as Mood | 'all' });
@@ -1518,6 +1729,8 @@ export default function HomePageClient() {
                   item.source === 'entity'
                     ? item.entity.description
                     : item.saved.description;
+                const tags =
+                  item.source === 'entity' ? item.entity.tags : undefined;
                 const mood: Mood =
                   item.source === 'entity'
                     ? item.entity.mood
@@ -1539,6 +1752,16 @@ export default function HomePageClient() {
                     : (item.saved.useCases as UseCaseTag[] | undefined);
 
                 const isSaved = savedWaypoints.some((wp) => wp.id === id);
+                const discoverySignal = buildDiscoverySignal({
+                  query: queryFromUrl,
+                  moodFilter: moodFromUrl,
+                  name,
+                  description,
+                  location: item.source === 'entity' ? item.entity.location : item.saved.location,
+                  tags,
+                  entityMood: mood,
+                  isSaved,
+                });
 
                 const onPlanClick = () => {
                   if (item.source === 'entity') {
@@ -1580,6 +1803,9 @@ export default function HomePageClient() {
                         {description && (
                           <p className="text-xs text-slate-400">{description}</p>
                         )}
+                        {discoverySignal && (
+                          <p className="text-[11px] text-slate-500">{discoverySignal}</p>
+                        )}
 
                         {/* Chips row */}
                         {hasAnyChip && (
@@ -1613,10 +1839,10 @@ export default function HomePageClient() {
                         <button
                           type="button"
                           onClick={onToggleFavorite}
-                          className="text-[11px] text-slate-300 hover:text-rose-400"
+                          className="text-[10px] text-slate-500 hover:text-slate-300"
                           aria-label={isSaved ? 'Remove from saved' : 'Save waypoint'}
                         >
-                          {isSaved ? ' Saved' : ' Save'}
+                          {isSaved ? 'Saved' : 'Save'}
                         </button>
                       </div>
                     </div>
@@ -1637,8 +1863,8 @@ export default function HomePageClient() {
               {displayWaypoints.length === 0 && (
                 <li className="rounded-xl border border-dashed border-slate-800 bg-slate-900/40 px-4 py-6 text-center text-xs text-slate-500">
                   {waypointView === 'saved'
-                    ? 'You have no saved waypoints yet. Tap the heart on a place to save it.'
-                    : 'No matches yet. Try a different query, remove mood filters, or hit Surprise Me to keep exploring.'}
+                    ? 'No saved waypoints yet. Save a place from search to keep it handy.'
+                    : 'No matches yet. Try a new query, clear filters, or hit Surprise Me for a fresh idea.'}
                 </li>
               )}
             </ul>

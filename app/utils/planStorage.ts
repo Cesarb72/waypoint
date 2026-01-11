@@ -1,4 +1,5 @@
 import { deserializePlan, serializePlan, type Plan } from '../plan-engine';
+import type { Origin } from '../plan-engine/origin';
 
 export type PlanIndexItem = {
   id: string;
@@ -13,6 +14,7 @@ export type PlanIndexItem = {
 
 const STORAGE_KEY = 'waypoint.v2.plansIndex';
 const SHARED_KEY = 'waypoint.v2.sharedIndex';
+const ORIGIN_KEY = 'waypoint.origin.active';
 const MAX_RECENT = 25;
 
 function hasLocalStorage(): boolean {
@@ -76,6 +78,17 @@ export function purgeInvalidOrLegacyPlans(items: PlanIndexItem[]): PlanIndexItem
     if (!item.encoded) return;
     try {
       const plan = deserializePlan(item.encoded);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(
+          '[originS] loaded plan JSON',
+          JSON.stringify({
+            id: plan?.id,
+            title: plan?.title,
+            originTop: (plan as any)?.origin ?? null,
+            originMeta: (plan as any)?.meta?.origin ?? null,
+          })
+        );
+      }
       if (plan.version === '2.0') {
         filtered.push(item);
       }
@@ -98,6 +111,17 @@ export function getPlansIndex(): PlanIndexItem[] {
 
 export function upsertRecentPlan(plan: Plan): PlanIndexItem {
   const updatedAt = new Date().toISOString();
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(
+      '[originS] saving plan JSON',
+      JSON.stringify({
+        id: plan.id,
+        title: plan.title,
+        originTop: (plan as any)?.origin ?? null,
+        originMeta: (plan as any)?.meta?.origin ?? null,
+      })
+    );
+  }
   const encoded = (() => {
     try {
       return serializePlan(plan);
@@ -180,4 +204,37 @@ export function isPlanShared(id: string): boolean {
   if (!id) return false;
   const set = readSharedSet();
   return set.has(id);
+}
+
+export function saveOrigin(origin: Origin): void {
+  if (!hasLocalStorage()) return;
+  try {
+    window.localStorage.setItem(ORIGIN_KEY, JSON.stringify(origin));
+  } catch {
+    // ignore storage failures
+  }
+}
+
+export function loadOrigin(): Origin | null {
+  if (!hasLocalStorage()) return null;
+  try {
+    const raw = window.localStorage.getItem(ORIGIN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Origin;
+    if (!parsed || typeof parsed.label !== 'string' || typeof parsed.type !== 'string') {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearOrigin(): void {
+  if (!hasLocalStorage()) return;
+  try {
+    window.localStorage.removeItem(ORIGIN_KEY);
+  } catch {
+    // ignore storage failures
+  }
 }
