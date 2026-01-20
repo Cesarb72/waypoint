@@ -1901,6 +1901,25 @@ export default function HomePageClient() {
                           })
                         : 'No time set'}
                     </p>
+                    {plan.chosen || plan.completed === true || plan.sentiment ? (
+                      <div className="flex flex-wrap gap-1 text-[10px] text-slate-500">
+                        {plan.chosen ? (
+                          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                            Chosen
+                          </span>
+                        ) : null}
+                        {plan.completed === true ? (
+                          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                            Completed
+                          </span>
+                        ) : null}
+                        {plan.sentiment ? (
+                          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 capitalize">
+                            {plan.sentiment}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap gap-1.5 justify-end">
                     <button

@@ -16,6 +16,12 @@ export type StoredPlan = {
   notes?: string;
   stops?: StoredStop[];
   location?: string;
+  chosen?: boolean;
+  chosenAt?: string | null;
+  completed?: boolean | null;
+  completedAt?: string | null;
+  sentiment?: 'good' | 'meh' | 'bad' | null;
+  feedbackNotes?: string | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -119,4 +125,84 @@ export function clearPlans(): void {
   } catch {
     // ignore storage failures
   }
+}
+
+export function updatePlanChosen(
+  id: string,
+  chosen: boolean,
+  chosenAt: string | null
+): StoredPlan | null {
+  const plans = readPlans();
+  const idx = plans.findIndex((plan) => plan.id === id);
+  if (idx === -1) return null;
+
+  const existing = plans[idx];
+  const next: StoredPlan = {
+    ...existing,
+    chosen,
+    chosenAt,
+  };
+
+  plans[idx] = next;
+  writePlans(plans);
+  return withDateTime(next);
+}
+
+export function updatePlanOutcome(
+  id: string,
+  completed: boolean | null,
+  completedAt: string | null
+): StoredPlan | null {
+  const plans = readPlans();
+  const idx = plans.findIndex((plan) => plan.id === id);
+  if (idx === -1) return null;
+
+  const existing = plans[idx];
+  const next: StoredPlan = {
+    ...existing,
+    completed,
+    completedAt,
+  };
+
+  plans[idx] = next;
+  writePlans(plans);
+  return withDateTime(next);
+}
+
+export function updatePlanSentiment(
+  id: string,
+  sentiment: 'good' | 'meh' | 'bad' | null
+): StoredPlan | null {
+  const plans = readPlans();
+  const idx = plans.findIndex((plan) => plan.id === id);
+  if (idx === -1) return null;
+
+  const existing = plans[idx];
+  const next: StoredPlan = {
+    ...existing,
+    sentiment,
+  };
+
+  plans[idx] = next;
+  writePlans(plans);
+  return withDateTime(next);
+}
+
+export function updatePlanFeedbackNotes(
+  id: string,
+  feedbackNotes: string | null
+): StoredPlan | null {
+  const plans = readPlans();
+  const idx = plans.findIndex((plan) => plan.id === id);
+  if (idx === -1) return null;
+
+  const existing = plans[idx];
+  const next: StoredPlan = {
+    ...existing,
+    feedbackNotes,
+  };
+
+  plans[idx] = next;
+  writePlans(plans);
+  return withDateTime(next);
 }

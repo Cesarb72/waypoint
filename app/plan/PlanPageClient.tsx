@@ -7,6 +7,10 @@ import {
   type StoredStop,
   type StoredPlan,
   loadPlanById,
+  updatePlanChosen,
+  updatePlanOutcome,
+  updatePlanSentiment,
+  updatePlanFeedbackNotes,
 } from '@/lib/planStorage';
 
 type Stop = {
@@ -23,6 +27,12 @@ type PlanDraft = {
   attendees: string;
   notes: string;
   stops: Stop[];
+  chosen: boolean;
+  chosenAt: string | null;
+  completed: boolean | null;
+  completedAt: string | null;
+  sentiment: 'good' | 'meh' | 'bad' | null;
+  feedbackNotes: string | null;
 };
 
 // Helper to create a new stop with a unique-ish id
@@ -55,6 +65,9 @@ export default function PlanPage() {
   const loggedRouteRef = useRef(false);
   const loggedPlanRef = useRef<string | null>(null);
   const loggedOriginPlanRef = useRef<string | null>(null);
+  const feedbackLimit = 280;
+  const sentimentLabel =
+    plan?.sentiment === 'good' ? 'Good' : plan?.sentiment === 'meh' ? 'Meh' : plan?.sentiment === 'bad' ? 'Bad' : null;
 
   // Validation state
   const [hasTriedSubmit, setHasTriedSubmit] = useState(false);
@@ -76,6 +89,12 @@ export default function PlanPage() {
           time: stored.time ?? '',
           attendees: stored.attendees ?? '',
           notes: stored.notes ?? '',
+          chosen: stored.chosen ?? false,
+          chosenAt: stored.chosenAt ?? null,
+          completed: stored.completed ?? null,
+          completedAt: stored.completedAt ?? null,
+          sentiment: stored.sentiment ?? null,
+          feedbackNotes: stored.feedbackNotes ?? null,
           stops:
             stored.stops && stored.stops.length > 0
               ? stored.stops.map((s) => ({
@@ -103,6 +122,12 @@ export default function PlanPage() {
       time: '',
       attendees: '',
       notes: '',
+      chosen: false,
+      chosenAt: null,
+      completed: null,
+      completedAt: null,
+      sentiment: null,
+      feedbackNotes: null,
       // Auto-fill Stop #1 label with selected entity name (or fallback)
       stops: [createStop(waypointName || 'Main stop')],
     });
@@ -231,6 +256,12 @@ export default function PlanPage() {
     notes?: string;
     stops: StoredStop[];
     location?: string;
+    chosen?: boolean;
+    chosenAt?: string | null;
+    completed?: boolean | null;
+    completedAt?: string | null;
+    sentiment?: 'good' | 'meh' | 'bad' | null;
+    feedbackNotes?: string | null;
   } {
     const storedStops: StoredStop[] = draft.stops.map((s) => ({
       id: s.id,
@@ -248,6 +279,12 @@ export default function PlanPage() {
       notes: draft.notes || '',
       stops: storedStops,
       location: inferredLocation || undefined,
+      chosen: draft.chosen,
+      chosenAt: draft.chosenAt,
+      completed: draft.completed,
+      completedAt: draft.completedAt,
+      sentiment: draft.sentiment,
+      feedbackNotes: draft.feedbackNotes,
     };
   }
 
@@ -327,8 +364,212 @@ export default function PlanPage() {
           <span className="text-xs text-slate-500">Waypoint · Plan</span>
         </header>
 
-        <header className="space-y-1">
-          <h1 className="text-2xl font-semibold">Create a plan</h1>
+        <header className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-2xl font-semibold">Create a plan</h1>
+            <button
+              type="button"
+              onClick={() => {
+                const nextChosen = !plan.chosen;
+                const nextChosenAt = nextChosen ? new Date().toISOString() : null;
+                setPlan((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        chosen: nextChosen,
+                        chosenAt: nextChosenAt,
+                      }
+                    : prev
+                );
+                const activeId = planId ?? urlPlanId ?? null;
+                if (activeId) {
+                  updatePlanChosen(activeId, nextChosen, nextChosenAt);
+                }
+              }}
+              aria-pressed={plan.chosen}
+              className={`rounded-full border px-2 py-1 text-[11px] transition ${
+                plan.chosen
+                  ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-200'
+                  : 'border-slate-700 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {plan.chosen ? 'Chosen' : 'Mark as chosen'}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+            <span>Did this happen?</span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const nextCompleted = true;
+                  const nextCompletedAt = new Date().toISOString();
+                  setPlan((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          completed: nextCompleted,
+                          completedAt: nextCompletedAt,
+                        }
+                      : prev
+                  );
+                  const activeId = planId ?? urlPlanId ?? null;
+                  if (activeId) {
+                    updatePlanOutcome(activeId, nextCompleted, nextCompletedAt);
+                  }
+                }}
+                aria-pressed={plan.completed === true}
+                className={`rounded-full border px-2 py-0.5 ${
+                  plan.completed === true
+                    ? 'border-slate-200 text-slate-100'
+                    : 'border-slate-800 text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const nextCompleted = false;
+                  const nextCompletedAt = null;
+                  setPlan((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          completed: nextCompleted,
+                          completedAt: nextCompletedAt,
+                        }
+                      : prev
+                  );
+                  const activeId = planId ?? urlPlanId ?? null;
+                  if (activeId) {
+                    updatePlanOutcome(activeId, nextCompleted, nextCompletedAt);
+                  }
+                }}
+                aria-pressed={plan.completed === false}
+                className={`rounded-full border px-2 py-0.5 ${
+                  plan.completed === false
+                    ? 'border-slate-200 text-slate-100'
+                    : 'border-slate-800 text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                No
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const nextCompleted = null;
+                  const nextCompletedAt = null;
+                  setPlan((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          completed: nextCompleted,
+                          completedAt: nextCompletedAt,
+                        }
+                      : prev
+                  );
+                  const activeId = planId ?? urlPlanId ?? null;
+                  if (activeId) {
+                    updatePlanOutcome(activeId, nextCompleted, nextCompletedAt);
+                  }
+                }}
+                aria-pressed={plan.completed === null}
+                className={`rounded-full border px-2 py-0.5 ${
+                  plan.completed === null
+                    ? 'border-slate-200 text-slate-100'
+                    : 'border-slate-800 text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                Skip
+              </button>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+            <span>How was it?</span>
+            <div className="flex items-center gap-1">
+              {(['good', 'meh', 'bad'] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => {
+                    const nextSentiment = plan.sentiment === value ? null : value;
+                    setPlan((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            sentiment: nextSentiment,
+                          }
+                        : prev
+                    );
+                    const activeId = planId ?? urlPlanId ?? null;
+                    if (activeId) {
+                      updatePlanSentiment(activeId, nextSentiment);
+                    }
+                  }}
+                  aria-pressed={plan.sentiment === value}
+                  className={`rounded-full border px-2 py-0.5 capitalize ${
+                    plan.sentiment === value
+                      ? 'border-slate-200 text-slate-100'
+                      : 'border-slate-800 text-slate-500 hover:text-slate-300'
+                  }`}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-slate-400">
+              <label htmlFor="plan-feedback-notes">Notes (optional)</label>
+              <span>
+                {feedbackLimit - (plan.feedbackNotes?.length ?? 0)}
+              </span>
+            </div>
+            <textarea
+              id="plan-feedback-notes"
+              value={plan.feedbackNotes ?? ''}
+              onChange={(e) => {
+                const raw = e.target.value.slice(0, feedbackLimit);
+                const normalized = raw.trim() ? raw : null;
+                const nextValue = normalized ?? '';
+                setPlan((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        feedbackNotes: nextValue,
+                      }
+                    : prev
+                );
+                const activeId = planId ?? urlPlanId ?? null;
+                if (activeId) {
+                  updatePlanFeedbackNotes(activeId, normalized);
+                }
+              }}
+              maxLength={feedbackLimit}
+              placeholder="Private notes for this plan..."
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 outline-none focus:border-slate-600 focus:ring-1 focus:ring-slate-600"
+            />
+          </div>
+          {plan.chosen || plan.completed === true || sentimentLabel ? (
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500">
+              {plan.chosen ? (
+                <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                  Chosen
+                </span>
+              ) : null}
+              {plan.completed === true ? (
+                <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                  Completed
+                </span>
+              ) : null}
+              {sentimentLabel ? (
+                <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                  {sentimentLabel}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
           <p className="text-sm text-slate-400">
             Set the basics, then shape the night.
           </p>
