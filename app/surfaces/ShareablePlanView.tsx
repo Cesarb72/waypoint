@@ -5,6 +5,9 @@ import { useEffect, useMemo, useState, useCallback } from 'react';
 import { serializePlan, type Plan, type Stop } from '../plan-engine';
 import { ctaClass } from '../ui/cta';
 import { getSupabaseBrowserClient } from '../lib/supabaseBrowserClient';
+import { CLOUD_PLANS_TABLE } from '../lib/cloudTables';
+import { getAttribution } from '../utils/attribution';
+import { getBrandingLite } from '../utils/branding';
 import {
   getAnchorWeight,
   getFallbackCoverage,
@@ -26,6 +29,8 @@ type ActionProps = {
   createCopyHref: string | null;
   shareFullUrl: string | null;
   onCopyShare: () => void;
+  embedFullUrl?: string | null;
+  onCopyEmbed?: () => void;
   isShared: boolean;
   shareStatus: 'idle' | 'copied';
 };
@@ -34,6 +39,7 @@ type Props = {
   plan: Plan;
   isShared?: boolean;
   actions?: ActionProps;
+  mode?: 'view' | 'edit';
 };
 
 function StopBadges({ stop }: { stop: Stop }) {
@@ -142,7 +148,7 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
       setIsLoading(true);
       try {
         const { data: currentRows, error: currentError } = await supabase
-          .from('waypoints')
+          .from(CLOUD_PLANS_TABLE)
           .select('id,title,plan,parent_id,updated_at')
           .eq('id', plan.id)
           .limit(1);
@@ -173,7 +179,7 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
 
         if (currentRow.parent_id) {
           const { data: parentRows } = await supabase
-            .from('waypoints')
+            .from(CLOUD_PLANS_TABLE)
             .select('plan')
             .eq('id', currentRow.parent_id)
             .limit(1);
@@ -185,7 +191,7 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
         }
 
         const { data: siblingRows, error: siblingError } = await supabase
-          .from('waypoints')
+          .from(CLOUD_PLANS_TABLE)
           .select('id,title,plan,parent_id,updated_at')
           .eq('parent_id', baseParentId)
           .order('updated_at', { ascending: false });
@@ -272,14 +278,14 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[11px] uppercase tracking-wide text-slate-400">
-            {isShared ? 'Shared plan' : 'Plan preview'}
+            {isShared ? 'Shared plan' : 'Plan context'}
           </p>
           <p className="text-sm text-slate-200">
             {isLoading
-              ? 'Loading shared details...'
+              ? 'Loading plan context...'
               : isShared
-              ? 'This plan was shared with you.'
-              : 'This plan is not shared yet.'}
+              ? 'This guide was shared with you.'
+              : 'Track variations of this plan.'}
           </p>
         </div>
         {canToggle ? (
@@ -298,7 +304,7 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
       {isOpen && canToggle ? (
         <div className="space-y-3">
           {isLoading ? (
-            <p className="text-xs text-slate-400">Loading shared versions...</p>
+            <p className="text-xs text-slate-400">Loading versions...</p>
           ) : (
             <>
               {currentEntry ? (
@@ -359,7 +365,7 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
                           href={entry.encoded ? `/plan?p=${encodeURIComponent(entry.encoded)}` : undefined}
                           className={`${ctaClass('chip')} text-[11px] ${entry.encoded ? '' : 'pointer-events-none opacity-60'}`}
                         >
-                          Open this version
+                          View this version
                         </a>
                       </div>
                     </div>
@@ -382,7 +388,7 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
               )}
               {siblingEntries.length === 0 ? (
                 <p className="text-[11px] text-slate-500">
-                  Edit this plan to create your own version for comparison.
+                  Make your own copy to compare versions.
                 </p>
               ) : null}
             </>
@@ -393,33 +399,90 @@ function DiscoveryStrip({ plan, isShared }: { plan: Plan; isShared?: boolean }) 
   );
 }
 
-export default function ShareablePlanView({ plan, isShared = false, actions }: Props) {
+export default function ShareablePlanView({
+  plan,
+  isShared = false,
+  actions,
+  mode = 'view',
+}: Props) {
+  const attribution = useMemo(
+    () => getAttribution(plan, { surface: 'share', mode }),
+    [plan, mode]
+  );
+  const branding = useMemo(() => getBrandingLite(plan), [plan]);
+  const templateBadge = plan.isTemplate
+    ? 'Template'
+    : plan.createdFrom?.kind === 'template'
+      ? 'From template'
+      : null;
+  const templateHelper = plan.isTemplate
+    ? "You're viewing a template. Use it to start a new plan."
+    : plan.createdFrom?.kind === 'template'
+      ? `Based on template: ${plan.createdFrom.templateTitle ?? 'Template'}`
+      : null;
+  const headerLabel = attribution.headline;
+  const editLabel = 'Open in Waypoint';
+  const shareLabel = mode === 'edit' ? 'Share this version' : 'Copy share link';
+
   return (
     <div className="max-w-3xl mx-auto px-4 py-10 space-y-8">
       <header className="space-y-3">
-        {isShared ? (
-          <div className="flex flex-col gap-1 rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2">
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
-                Shared
-              </span>
-              <p className="text-sm font-semibold text-emerald-50">This plan was shared with you.</p>
-            </div>
-            <p className="text-[11px] text-emerald-100">Editing will create your own version.</p>
-          </div>
-        ) : null}
         <div className="space-y-2">
-          <p className="text-xs uppercase tracking-wide text-slate-400">
-            {isShared ? 'Shared plan' : 'Plan preview'}
-          </p>
-          <h1 className="text-3xl font-semibold text-slate-50">{plan.title || 'Untitled plan'}</h1>
+          <p className="text-xs uppercase tracking-wide text-slate-400">{headerLabel}</p>
+          {branding ? (
+            <div
+              className={`flex flex-wrap items-center gap-2 text-xs text-slate-300 border-l-2 pl-3 ${branding.accentLineClass ?? 'border-l-slate-800'}`}
+            >
+              {branding.logoUrl ? (
+                <img
+                  src={branding.logoUrl}
+                  alt={branding.presentedBy ?? 'Logo'}
+                  className="h-6 w-auto max-w-[140px] rounded-sm border border-slate-800 bg-slate-900/60 px-1"
+                  loading="lazy"
+                  onError={(event) => {
+                    event.currentTarget.style.display = 'none';
+                  }}
+                />
+              ) : null}
+              <span className="truncate">
+                Presented by{branding.presentedBy ? ` ${branding.presentedBy}` : ''}
+              </span>
+              {branding.accent && branding.accentClass ? (
+                <span
+                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${branding.accentClass}`}
+                >
+                  {branding.accent}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="space-y-1">
+            <p className="text-xs text-slate-400">
+              {attribution.byline} · {attribution.provenance}
+            </p>
+            <p className="text-[11px] text-slate-500">{attribution.modeHint}</p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="text-3xl font-semibold text-slate-50">{plan.title || 'Untitled plan'}</h1>
+            {templateBadge ? (
+              <span className="rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[11px] text-slate-200">
+                {templateBadge}
+              </span>
+            ) : null}
+          </div>
+          {templateHelper ? <p className="text-xs text-slate-400">{templateHelper}</p> : null}
           {plan.intent ? (
-            <p className="text-base text-slate-200">{plan.intent}</p>
+            <div className="space-y-1">
+              <p className="text-xs uppercase tracking-wide text-slate-400">Intent</p>
+              <p className="text-base text-slate-200">{plan.intent}</p>
+            </div>
           ) : null}
           {plan.audience ? (
-            <span className="inline-block mt-2 text-xs px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-200">
-              {plan.audience}
-            </span>
+            <div className="inline-flex items-center gap-2 text-xs text-slate-300">
+              <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-1">
+                For: {plan.audience}
+              </span>
+            </div>
           ) : null}
         </div>
       </header>
@@ -458,19 +521,32 @@ export default function ShareablePlanView({ plan, isShared = false, actions }: P
       <FooterSection plan={plan} />
 
       {actions?.createCopyHref ? (
-        <div className="pt-4 border-t border-slate-800 space-y-1">
+        <div className="pt-4 border-t border-slate-800 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <Link href={actions.createCopyHref} className={ctaClass('chip')}>
-              Edit
+            <Link
+              href={actions.createCopyHref}
+              className={ctaClass(mode === 'edit' ? 'primary' : 'chip')}
+            >
+              {editLabel}
             </Link>
             <button
               type="button"
               onClick={actions.onCopyShare}
               disabled={!actions.shareFullUrl}
-              className={`${ctaClass('primary')} text-[11px]`}
+              className={`${ctaClass(mode === 'edit' ? 'primary' : 'chip')} text-[11px]`}
             >
-              Share this version
+              {shareLabel}
             </button>
+            {actions.onCopyEmbed ? (
+              <button
+                type="button"
+                onClick={actions.onCopyEmbed}
+                disabled={!actions.embedFullUrl}
+                className={`${ctaClass('chip')} text-[11px]`}
+              >
+                Copy embed link
+              </button>
+            ) : null}
             {actions.isShared ? (
               <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
                 Shared
@@ -479,11 +555,11 @@ export default function ShareablePlanView({ plan, isShared = false, actions }: P
             {actions.shareStatus === 'copied' ? (
               <span className="text-[11px] text-emerald-200">Link copied.</span>
             ) : null}
+          </div>
+          <p className="text-[11px] text-slate-400">
+            Editing creates your own version. The original won’t change.
+          </p>
         </div>
-        <p className="text-[11px] text-slate-400">
-          Editing creates your own version. The original won’t change.
-        </p>
-      </div>
     ) : null}
   </div>
   );

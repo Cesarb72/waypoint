@@ -12,10 +12,27 @@ export type PlanIndexItem = {
   isShared?: boolean;
 };
 
+export type TemplateIndexItem = {
+  id: string;
+  title: string;
+  intent: string;
+  audience?: string;
+  encoded: string;
+  updatedAt: string;
+  isSaved: boolean;
+  isShared?: boolean;
+  templateTitle: string;
+  packId: string;
+  packTitle: string;
+  packDescription?: string;
+  packTags?: string[];
+};
+
 const STORAGE_KEY = 'waypoint.v2.plansIndex';
 const SHARED_KEY = 'waypoint.v2.sharedIndex';
 const ORIGIN_KEY = 'waypoint.origin.active';
 const MAX_RECENT = 25;
+const originLogState = { loaded: false, saved: false };
 
 function hasLocalStorage(): boolean {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -78,12 +95,17 @@ export function purgeInvalidOrLegacyPlans(items: PlanIndexItem[]): PlanIndexItem
     if (!item.encoded) return;
     try {
       const plan = deserializePlan(item.encoded);
-      if (process.env.NODE_ENV !== 'production') {
-        console.log(
-          '[originS] loaded plan JSON',
-          JSON.stringify({
-            id: plan?.id,
-            title: plan?.title,
+    if (
+      process.env.NODE_ENV !== 'production' &&
+      process.env.NEXT_PUBLIC_DEBUG_ORIGINS === '1' &&
+      !originLogState.loaded
+    ) {
+      originLogState.loaded = true;
+      console.log(
+        '[originS] loaded plan JSON',
+        JSON.stringify({
+          id: plan?.id,
+          title: plan?.title,
             originTop: (plan as any)?.origin ?? null,
             originMeta: (plan as any)?.meta?.origin ?? null,
           })
@@ -111,7 +133,12 @@ export function getPlansIndex(): PlanIndexItem[] {
 
 export function upsertRecentPlan(plan: Plan): PlanIndexItem {
   const updatedAt = new Date().toISOString();
-  if (process.env.NODE_ENV !== 'production') {
+  if (
+    process.env.NODE_ENV !== 'production' &&
+    process.env.NEXT_PUBLIC_DEBUG_ORIGINS === '1' &&
+    !originLogState.saved
+  ) {
+    originLogState.saved = true;
     console.log(
       '[originS] saving plan JSON',
       JSON.stringify({
@@ -180,6 +207,39 @@ export function getRecentPlans(): PlanIndexItem[] {
 
 export function getSavedPlans(): PlanIndexItem[] {
   return sortByUpdated(getPlansIndex().filter((item) => item.isSaved));
+}
+
+export function getTemplatePlans(): TemplateIndexItem[] {
+  const items = getPlansIndex();
+  const templates: TemplateIndexItem[] = [];
+
+  items.forEach((item) => {
+    if (!item.encoded) return;
+    try {
+      const plan = deserializePlan(item.encoded);
+      if (!plan.isTemplate) return;
+      const templateTitle = plan.templateMeta?.title || plan.title || 'Template';
+      const packId = plan.templateMeta?.packId || 'custom';
+      const packTitle = plan.templateMeta?.packTitle || 'My templates';
+      templates.push({
+        ...item,
+        title: plan.title || item.title,
+        intent: plan.intent || item.intent,
+        audience: plan.audience || item.audience,
+        templateTitle,
+        packId,
+        packTitle,
+        packDescription: plan.templateMeta?.packDescription,
+        packTags: plan.templateMeta?.packTags,
+      });
+    } catch {
+      // ignore invalid payloads
+    }
+  });
+
+  return [...templates].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  );
 }
 
 export function removePlanById(id: string): void {

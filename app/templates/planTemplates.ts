@@ -10,11 +10,11 @@ export type PlanTemplate = {
 export const PLAN_TEMPLATES: PlanTemplate[] = [
   {
     id: 'date-night',
-    label: 'Date Night',
-    description: 'Relaxed evening together.',
+    label: 'Plan a date night',
+    description: 'Good for evenings with one other person.',
     prefill: {
-      title: 'Date Night',
-      intent: 'A relaxed evening together',
+      title: 'Date night',
+      intent: 'A relaxed evening together.',
       stops: [
         {
           id: 'dn-stop-1',
@@ -39,15 +39,15 @@ export const PLAN_TEMPLATES: PlanTemplate[] = [
   },
   {
     id: 'family-outing',
-    label: 'Family Outing',
-    description: 'An easy plan that works for everyone.',
+    label: 'Plan a family outing',
+    description: 'Good for groups with kids or mixed ages.',
     prefill: {
-      title: 'Family Outing',
-      intent: 'An easy plan that works for everyone',
+      title: 'Family outing',
+      intent: 'An easy plan that works for everyone.',
       stops: [
         {
           id: 'fo-stop-1',
-          name: 'Activity',
+          name: 'Main activity',
           role: 'anchor',
           optionality: 'required',
         },
@@ -61,24 +61,30 @@ export const PLAN_TEMPLATES: PlanTemplate[] = [
     },
   },
   {
-    id: 'venue-pre-show',
-    label: 'Venue Pre-Show',
-    description: 'A smooth lead-in before an event.',
+    id: 'solo-reset',
+    label: 'Plan a solo reset',
+    description: 'Good for quiet, personal time.',
     prefill: {
-      title: 'Pre-Show Plan',
-      intent: 'A smooth lead-in before an event',
+      title: 'Solo reset',
+      intent: 'A quiet reset with time to unwind.',
       stops: [
         {
-          id: 'vps-stop-1',
-          name: 'Food or drink',
+          id: 'sr-stop-1',
+          name: 'Calm start',
           role: 'support',
           optionality: 'required',
         },
         {
-          id: 'vps-stop-2',
-          name: 'Event',
+          id: 'sr-stop-2',
+          name: 'Main reset',
           role: 'anchor',
           optionality: 'required',
+        },
+        {
+          id: 'sr-stop-3',
+          name: 'Soft landing',
+          role: 'optional',
+          optionality: 'flexible',
         },
       ],
     },
