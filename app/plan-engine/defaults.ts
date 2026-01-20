@@ -59,6 +59,9 @@ export function createPlanFromTemplate(templatePlan: Partial<Plan>): Plan {
             : [...DEFAULT_SHARE_MODES],
         }
       : { shareModes: [...DEFAULT_SHARE_MODES] },
+    isTemplate: false,
+    templateMeta: undefined,
+    createdFrom: templatePlan.createdFrom,
     metadata: {
       ...templatePlan.metadata,
       createdAt: timestamp,
@@ -72,4 +75,17 @@ export function createPlanFromTemplate(templatePlan: Partial<Plan>): Plan {
   };
 
   return prefills;
+}
+
+export function createPlanFromTemplatePlan(templatePlan: Plan): Plan {
+  const next = createPlanFromTemplate(templatePlan);
+  const templateTitle = templatePlan.templateMeta?.title || templatePlan.title || 'Template';
+  next.title = templateTitle;
+  next.createdFrom = {
+    kind: 'template',
+    templateId: templatePlan.id,
+    templateTitle,
+    packId: templatePlan.templateMeta?.packId,
+  };
+  return next;
 }

@@ -1,6 +1,7 @@
 ﻿'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import type {
   Entity,
@@ -16,6 +17,8 @@ import { loadPlans, deletePlan, clearPlans } from '@/lib/planStorage';
 import {
   loadDiscoverySession,
   saveDiscoverySession,
+  getDiscoveryRestoreFlag,
+  clearDiscoveryRestoreFlag,
 } from '@/lib/discoveryStorage';
 import {
   loadSavedWaypoints,
@@ -23,9 +26,11 @@ import {
   removeSavedWaypoint,
   type SavedWaypoint,
 } from '@/lib/savedWaypoints';
+import { deriveOrigin } from '@/lib/deriveOrigin';
 import {
   createEmptyPlan,
   createPlanFromTemplate,
+  createPlanFromTemplatePlan,
   deserializePlan,
   serializePlan,
   type Plan,
@@ -41,14 +46,20 @@ import {
 import {
   getRecentPlans,
   getSavedPlans,
+  getTemplatePlans,
   removePlanById,
   markPlanShared,
   type PlanIndexItem,
+  type TemplateIndexItem,
   isPlanShared,
 } from './utils/planStorage';
 import { ctaClass } from './ui/cta';
 import AuthPanel from './auth/AuthPanel';
+import { useSession } from './auth/SessionProvider';
 import { getSupabaseBrowserClient } from './lib/supabaseBrowserClient';
+import { fetchCloudPlan, listCloudPlans } from './lib/cloudPlans';
+import { CLOUD_PLANS_TABLE } from './lib/cloudTables';
+import { withPreservedModeParam } from './lib/entryMode';
 
 const MOOD_OPTIONS: (Mood | 'all')[] = [
   'all',
@@ -69,6 +80,23 @@ type DisplayWaypoint =
   | { source: 'saved'; saved: SavedWaypoint };
 
 const PENDING_STARTER_KEY = 'waypoint_pending_starter';
+const DEMO_PLAN: Plan = {
+  id: 'demo-plan',
+  version: '2.0',
+  title: 'Demo plan',
+  intent: 'Test plan',
+  audience: 'me',
+  stops: [
+    {
+      id: 'stop-1',
+      name: 'Anchor',
+      role: 'anchor',
+      optionality: 'required',
+    },
+  ],
+};
+
+let didLogSavedWaypoint = false;
 
 // Helpers to pretty-print tags on the chips
 function labelCost(cost: CostTag): string {
@@ -100,6 +128,11 @@ function labelUseCase(u: UseCaseTag): string {
     default:
       return u;
   }
+}
+
+function buildReturnTo(pathname: string, searchParams: URLSearchParams): string {
+  const qs = searchParams.toString();
+  return `${pathname}${qs ? `?${qs}` : ''}`;
 }
 
 function formatMoodLabel(mood: Mood): string {
@@ -161,6 +194,8 @@ export default function HomePageClient() {
   const searchParams = useSearchParams();
   const showDevTools = process.env.NEXT_PUBLIC_SHOW_DEV_TOOLS === '1';
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  const { user } = useSession();
+  const userId = user?.id ?? null;
 
   //  Data from "API"
   const [data, setData] = useState<Entity[]>([]);
@@ -179,17 +214,31 @@ export default function HomePageClient() {
   //  Saved waypoints (favorites)
   const [savedWaypoints, setSavedWaypoints] = useState<SavedWaypoint[]>([]);
   const [waypointView, setWaypointView] = useState<'all' | 'saved'>('all');
+  /**
+   * SavedWaypoint fields observed from local storage (lib/savedWaypoints.ts):
+   * id, name, description, location, mood, cost, proximity, useCases.
+   * Source: SavedWaypoint is derived from Entity in data/entities.ts.
+   */
   //  V2 plans stored via plan engine (recent/saved)
   const [recentV2Plans, setRecentV2Plans] = useState<PlanIndexItem[]>([]);
   const [recentShowSavedOnly, setRecentShowSavedOnly] = useState(false);
-  const [userId, setUserId] = useState<string | null>(null);
+  const [templatePlans, setTemplatePlans] = useState<TemplateIndexItem[]>([]);
+  const [templateLoading, setTemplateLoading] = useState(false);
+  const [showTemplateExplorer, setShowTemplateExplorer] = useState(false);
+  const [activeTemplatePackId, setActiveTemplatePackId] = useState<string | null>(null);
+  const [selectedTemplate, setSelectedTemplate] = useState<TemplateIndexItem | null>(null);
   const [supabaseLoading, setSupabaseLoading] = useState(false);
   const [migrationMessage, setMigrationMessage] = useState<string | null>(null);
   const authPanelRef = useRef<HTMLDivElement | null>(null);
+  const [showAuthPanel, setShowAuthPanel] = useState(false);
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
   const discoveryScrollTimeoutRef = useRef<number | null>(null);
   const discoverySnapshotRef = useRef<{ path: string; queryString: string } | null>(null);
   const discoveryScrollRestoredRef = useRef(false);
   const discoveryActiveRef = useRef(false);
+  const templateSectionRef = useRef<HTMLDivElement | null>(null);
+  const templatesBootstrappedRef = useRef(false);
+  const didLogDerivedOriginRef = useRef(false);
 
   function requestLocation() {
     if (typeof window === 'undefined' || !('geolocation' in navigator)) {
@@ -222,27 +271,36 @@ export default function HomePageClient() {
   useEffect(() => {
     const saved = loadSavedWaypoints();
     setSavedWaypoints(saved);
+    if (
+      process.env.NODE_ENV === 'development' &&
+      !didLogSavedWaypoint &&
+      saved.length > 0
+    ) {
+      didLogSavedWaypoint = true;
+      console.debug('[saved-waypoints] sample shape', saved[0]);
+    }
   }, []);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setUserId(data.session?.user.id ?? null);
-    });
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserId(session?.user.id ?? null);
-    });
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, [supabase]);
 
   useEffect(() => {
     if (!userId) {
       setSupabaseLoading(false);
     }
   }, [userId]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return;
+    if (didLogDerivedOriginRef.current) return;
+    if (waypointView !== 'saved') return;
+    if (savedWaypoints.length === 0) return;
+    didLogDerivedOriginRef.current = true;
+    savedWaypoints.slice(0, 3).forEach((item) => {
+      const origin = deriveOrigin(item);
+      console.debug('[saved-waypoints] origin', {
+        title: item.name ?? item.id,
+        origin,
+      });
+    });
+  }, [savedWaypoints, waypointView]);
 
   useEffect(() => {
     if (!userId) {
@@ -254,42 +312,198 @@ export default function HomePageClient() {
   const loadSupabaseWaypoints = useCallback(async () => {
     if (!userId) return;
     setSupabaseLoading(true);
-    const { data: rows, error: supaError } = await supabase
-      .from('waypoints')
-      .select('id,title,plan,parent_id,updated_at')
-      .eq('owner_id', userId)
-      .order('updated_at', { ascending: false });
-
-    if (supaError || !rows) {
+    const listResult = await listCloudPlans(userId);
+    if (!listResult.ok) {
       setSupabaseLoading(false);
+      const fallback = getRecentPlans().map((item) => ({
+        ...item,
+        isShared: isPlanShared(item.id),
+      }));
+      setRecentV2Plans(fallback.slice(0, 8));
       return;
     }
 
-    const mapped: PlanIndexItem[] = rows
-      .map((row) => {
-        const planObj = row.plan as unknown as Plan | null;
-        if (!planObj) return null;
+    const cloudRows = await Promise.all(
+      listResult.plans.map(async (summary) => {
+        const detail = await fetchCloudPlan(summary.id, userId);
+        if (!detail.ok) return null;
         try {
-          const encoded = serializePlan(planObj);
+          const encoded = serializePlan(detail.plan);
           return {
-            id: row.id,
-            title: row.title || planObj.title || 'Waypoint',
-            intent: planObj.intent,
-            audience: planObj.audience,
+            id: summary.id,
+            title: summary.title || detail.plan.title || 'Waypoint',
+            intent: detail.plan.intent,
+            audience: detail.plan.audience,
             encoded,
-            updatedAt: row.updated_at || new Date().toISOString(),
+            updatedAt: new Date(summary.updatedAt).toISOString(),
             isSaved: true,
-            isShared: isPlanShared(row.id),
-          };
+            isShared: isPlanShared(summary.id),
+          } as PlanIndexItem;
         } catch {
           return null;
         }
       })
-      .filter(Boolean) as PlanIndexItem[];
+    );
 
+    const mapped = cloudRows.filter(Boolean) as PlanIndexItem[];
     setRecentV2Plans(mapped.slice(0, 8));
     setSupabaseLoading(false);
-  }, [supabase, userId]);
+  }, [userId]);
+
+  const loadTemplates = useCallback(async () => {
+    const localTemplates = getTemplatePlans();
+    if (!userId) {
+      setTemplateLoading(false);
+      setTemplatePlans(localTemplates.slice(0, 8));
+      return;
+    }
+    setTemplateLoading(true);
+    const listResult = await listCloudPlans(userId);
+    if (!listResult.ok) {
+      setTemplatePlans(localTemplates.slice(0, 8));
+      setTemplateLoading(false);
+      return;
+    }
+
+    const cloudRows = await Promise.all(
+      listResult.plans.map(async (summary) => {
+        const detail = await fetchCloudPlan(summary.id, userId);
+        if (!detail.ok) return null;
+        const plan = detail.plan;
+        if (!plan.isTemplate) return null;
+        try {
+          const encoded = serializePlan(plan);
+          const templateTitle = plan.templateMeta?.title || plan.title || 'Template';
+          return {
+            id: summary.id,
+            title: plan.title || summary.title || 'Template',
+            intent: plan.intent || '',
+            audience: plan.audience || undefined,
+            encoded,
+            updatedAt: new Date(summary.updatedAt).toISOString(),
+            isSaved: true,
+            isShared: isPlanShared(summary.id),
+            templateTitle,
+          } as TemplateIndexItem;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    const merged = new Map<string, TemplateIndexItem>();
+    localTemplates.forEach((item) => merged.set(item.id, item));
+    cloudRows.filter(Boolean).forEach((item) => merged.set((item as TemplateIndexItem).id, item as TemplateIndexItem));
+
+    const sorted = [...merged.values()].sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+    setTemplatePlans(sorted.slice(0, 8));
+    setTemplateLoading(false);
+  }, [userId]);
+
+  const templatePacks = useMemo(() => {
+    const packMap = new Map<
+      string,
+      { id: string; title: string; description?: string; tags?: string[]; count: number }
+    >();
+    templatePlans.forEach((template) => {
+      const existing = packMap.get(template.packId);
+      if (existing) {
+        existing.count += 1;
+        return;
+      }
+      packMap.set(template.packId, {
+        id: template.packId,
+        title: template.packTitle,
+        description: template.packDescription,
+        tags: template.packTags,
+        count: 1,
+      });
+    });
+    const slugify = (value: unknown) => {
+      if (typeof value !== 'string') return '';
+      const trimmed = value.trim();
+      if (!trimmed) return '';
+      return trimmed
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '');
+    };
+    const packs = [...packMap.values()];
+    const idCounts = new Map<string, number>();
+    return packs.map((pack) => {
+      const baseId = typeof pack.id === 'string' && pack.id.trim() ? pack.id : '';
+      const fallback =
+        slugify(pack.title) || slugify((pack as { name?: string }).name) || slugify((pack as { label?: string }).label);
+      const normalizedBase = baseId || fallback || 'pack';
+      const seen = idCounts.get(normalizedBase) ?? 0;
+      idCounts.set(normalizedBase, seen + 1);
+      const id = seen === 0 ? normalizedBase : `${normalizedBase}-${seen + 1}`;
+      return { ...pack, id };
+    });
+  }, [templatePlans]);
+
+  const activeTemplatePack = useMemo(() => {
+    if (!activeTemplatePackId) return null;
+    return templatePacks.find((pack) => pack.id === activeTemplatePackId) ?? null;
+  }, [activeTemplatePackId, templatePacks]);
+
+  const templatesInActivePack = useMemo(() => {
+    if (!activeTemplatePackId) return templatePlans;
+    return templatePlans.filter((template) => template.packId === activeTemplatePackId);
+  }, [activeTemplatePackId, templatePlans]);
+
+  const selectedTemplatePlan = useMemo(() => {
+    if (!selectedTemplate?.encoded) return null;
+    try {
+      return deserializePlan(selectedTemplate.encoded);
+    } catch {
+      return null;
+    }
+  }, [selectedTemplate]);
+  const demoFromPayload = useMemo(() => {
+    try {
+      return serializePlan(DEMO_PLAN);
+    } catch {
+      return '';
+    }
+  }, []);
+  const selectedTemplateFromPayload = useMemo(() => {
+    if (!selectedTemplatePlan) return '';
+    try {
+      const next = createPlanFromTemplatePlan(selectedTemplatePlan);
+      return serializePlan(next);
+    } catch {
+      return '';
+    }
+  }, [selectedTemplatePlan]);
+  const buildModeHref = useCallback((mode: 'plan' | 'publish' | 'curate', from?: string) => {
+    const params = new URLSearchParams();
+    params.set('mode', mode);
+    if (from) params.set('from', from);
+    return `/create?${params.toString()}`;
+  }, []);
+  const planModeHref = useMemo(() => {
+    if (selectedTemplateFromPayload) {
+      return buildModeHref('plan', selectedTemplateFromPayload);
+    }
+    return buildModeHref('plan');
+  }, [buildModeHref, selectedTemplateFromPayload]);
+  const publishModeHref = useMemo(() => {
+    return buildModeHref('publish', selectedTemplateFromPayload || demoFromPayload);
+  }, [buildModeHref, demoFromPayload, selectedTemplateFromPayload]);
+  const curateModeHref = useMemo(() => {
+    return buildModeHref('curate', selectedTemplateFromPayload || demoFromPayload);
+  }, [buildModeHref, demoFromPayload, selectedTemplateFromPayload]);
+  const cityDistrictsHref = useMemo(
+    () => withPreservedModeParam('/city/san-jose', searchParams),
+    [searchParams]
+  );
+  const downtownDistrictHref = useMemo(
+    () => withPreservedModeParam('/districts/downtown', searchParams),
+    [searchParams]
+  );
 
   useEffect(() => {
     if (!userId) return;
@@ -323,7 +537,7 @@ export default function HomePageClient() {
         .filter(Boolean);
 
       try {
-        await supabase.from('waypoints').upsert(payload as any, { onConflict: 'id' });
+        await supabase.from(CLOUD_PLANS_TABLE).upsert(payload as any, { onConflict: 'id' });
         window.localStorage.setItem(flag, '1');
         if (payload.length > 0) {
           setMigrationMessage(
@@ -343,6 +557,66 @@ export default function HomePageClient() {
     loadSupabaseWaypoints();
   }, [loadSupabaseWaypoints]);
 
+  useEffect(() => {
+    loadTemplates();
+  }, [loadTemplates]);
+
+  useEffect(() => {
+    if (templatesBootstrappedRef.current) return;
+    const templatesParam = searchParams.get('templates');
+    if (templatesParam !== '1') return;
+    templatesBootstrappedRef.current = true;
+    setShowTemplateExplorer(true);
+    setActiveTemplatePackId(null);
+    if (templateSectionRef.current) {
+      templateSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    const authParam = searchParams.get('auth');
+    if (authParam !== '1') return;
+    handleScrollToAuth();
+  }, [searchParams]);
+
+  useEffect(() => {
+    const noticeParam = searchParams.get('notice');
+    if (!noticeParam) return;
+    if (noticeParam === 'missing-plan') {
+      setNoticeMessage('We could not open that plan. You are back on Home.');
+    } else {
+      setNoticeMessage('We could not open that view. You are back on Home.');
+    }
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('notice');
+    const qs = nextParams.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [pathname, router, searchParams]);
+
+  useEffect(() => {
+    const searchParam = searchParams.get('search');
+    if (searchParam !== '1') return;
+    if (typeof window === 'undefined') return;
+    requestAnimationFrame(() => {
+      const input = document.getElementById('home-what') as HTMLInputElement | null;
+      if (input) {
+        input.focus();
+        input.select();
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('search');
+    const qs = nextParams.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [pathname, router, searchParams]);
+
+  useEffect(() => {
+    if (!showTemplateExplorer) {
+      setActiveTemplatePackId(null);
+    }
+  }, [showTemplateExplorer]);
+
 
   // Load V2 recent/saved plans on mount and when filter toggles
   useEffect(() => {
@@ -361,6 +635,10 @@ export default function HomePageClient() {
     const raw = searchParams.toString();
     return raw ? `?${raw}` : '';
   }, [searchParams]);
+  const returnTo = useMemo(
+    () => buildReturnTo(pathname || '/', searchParams),
+    [pathname, searchParams]
+  );
 
   const moodFromUrlRaw =
     (searchParams.get('mood') as Mood | 'all' | null) ?? 'all';
@@ -396,6 +674,25 @@ export default function HomePageClient() {
       queryString: discoveryQueryString,
       createdAt: Date.now(),
     };
+    const restorePending = getDiscoveryRestoreFlag();
+    if (
+      restorePending &&
+      (!existing ||
+        existing.path !== nextSession.path ||
+        existing.queryString !== nextSession.queryString)
+    ) {
+      clearDiscoveryRestoreFlag();
+    }
+    if (
+      restorePending &&
+      existing &&
+      existing.path === nextSession.path &&
+      existing.queryString === nextSession.queryString &&
+      window.scrollY === 0 &&
+      existing.scrollY > 0
+    ) {
+      return;
+    }
     const nextScrollY =
       existing &&
       existing.queryString === nextSession.queryString &&
@@ -554,9 +851,13 @@ export default function HomePageClient() {
     if (session.path !== (pathname || '/')) return;
     if (session.queryString !== discoveryQueryString) return;
     discoveryScrollRestoredRef.current = true;
+    const restorePending = getDiscoveryRestoreFlag();
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         window.scrollTo({ top: session.scrollY, left: 0, behavior: 'auto' });
+        if (restorePending) {
+          clearDiscoveryRestoreFlag();
+        }
       });
     });
   }, [discoveryQueryString, error, filteredEntities.length, hasDiscoveryContext, isLoading, pathname]);
@@ -602,7 +903,7 @@ export default function HomePageClient() {
     params.set('from', encoded);
     params.set('originSource', 'home_search');
     const href = `/create?${params.toString()}`;
-    router.push(href);
+    router.push(withPreservedModeParam(href, searchParams));
   }
 
   //  When user clicks "Plan this"
@@ -655,7 +956,12 @@ export default function HomePageClient() {
     if (!surprisePlan) return;
     try {
       const encoded = serializePlan(surprisePlan);
-      router.push(`/create?from=${encodeURIComponent(encoded)}&source=surprise`);
+      router.push(
+        withPreservedModeParam(
+          `/create?from=${encodeURIComponent(encoded)}&source=surprise`,
+          searchParams
+        )
+      );
     } catch {
       setSurpriseError('Could not open this plan. Please try again.');
     }
@@ -725,7 +1031,12 @@ export default function HomePageClient() {
 
   //  Edit an existing plan
   function handleEditPlan(plan: StoredPlan) {
-    router.push(`/plan?planId=${encodeURIComponent(plan.id)}`);
+    router.push(
+      withPreservedModeParam(
+        `/plan?planId=${encodeURIComponent(plan.id)}`,
+        searchParams
+      )
+    );
   }
 
   function handleShareRecentV2Plan(plan: PlanIndexItem) {
@@ -752,6 +1063,65 @@ export default function HomePageClient() {
     } else {
       window.alert(href);
     }
+  }
+
+  function handleUseTemplate(template: TemplateIndexItem) {
+    if (!template.encoded) return;
+    try {
+      const templatePlan = deserializePlan(template.encoded);
+      const next = createPlanFromTemplatePlan(templatePlan);
+      const origin = {
+        kind: 'template' as const,
+        label: template.templateTitle || template.title || 'Untitled template',
+        entityId: template.id,
+      };
+      next.meta = {
+        ...next.meta,
+        origin,
+      };
+      next.origin = origin;
+      const encoded = serializePlan(next);
+      const originHref = '/?templates=1';
+      router.push(
+        withPreservedModeParam(
+          `/create?from=${encodeURIComponent(encoded)}&origin=${encodeURIComponent(originHref)}&returnTo=${encodeURIComponent(returnTo)}`,
+          searchParams
+        )
+      );
+    } catch {
+      // ignore invalid payloads
+    }
+  }
+
+  function handleOpenTemplatePreview(template: TemplateIndexItem) {
+    setSelectedTemplate(template);
+  }
+
+  function handleCloseTemplatePreview() {
+    setSelectedTemplate(null);
+  }
+
+  async function handleDeleteTemplate(template: TemplateIndexItem) {
+    if (!userId) return;
+    try {
+      await supabase
+        .from(CLOUD_PLANS_TABLE)
+        .delete()
+        .eq('id', template.id)
+        .eq('owner_id', userId);
+    } catch {
+      // ignore delete failures for now
+    }
+    removePlanById(template.id);
+    setTemplatePlans((prev) => prev.filter((item) => item.id !== template.id));
+    if (selectedTemplate?.id === template.id) {
+      setSelectedTemplate(null);
+    }
+  }
+
+  function handleSelectTemplatePack(packId: string) {
+    setActiveTemplatePackId(packId);
+    setShowTemplateExplorer(true);
   }
 
   //  View shared/summary view of a plan
@@ -794,7 +1164,7 @@ export default function HomePageClient() {
 
   function handleRemoveRecentV2(planId: string) {
     if (userId) {
-      supabase.from('waypoints').delete().eq('id', planId).eq('owner_id', userId).then(() => {
+      supabase.from(CLOUD_PLANS_TABLE).delete().eq('id', planId).eq('owner_id', userId).then(() => {
         setRecentV2Plans((prev) => prev.filter((p) => p.id !== planId));
       });
     } else {
@@ -940,8 +1310,11 @@ export default function HomePageClient() {
   }
 
   function handleScrollToAuth() {
+    setShowAuthPanel(true);
     if (authPanelRef.current) {
-      authPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      requestAnimationFrame(() => {
+        authPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     }
   }
 
@@ -1038,7 +1411,12 @@ export default function HomePageClient() {
         const plan = buildPlanFromStarter(starter, userId);
         const encoded = serializePlan(plan);
         setSelectedStarter(null);
-        router.push(`/create?from=${encodeURIComponent(encoded)}`);
+        router.push(
+          withPreservedModeParam(
+            `/create?from=${encodeURIComponent(encoded)}`,
+            searchParams
+          )
+        );
       } catch {
         setPendingStarterMessage('Could not start planning right now. Please try again.');
       } finally {
@@ -1112,6 +1490,14 @@ export default function HomePageClient() {
               Start from an idea, adapt it for your crew, and keep one source of truth. Preview without an account; sign in to save, edit, or share.
             </p>
           </div>
+          <div className="flex flex-wrap gap-2">
+            <Link href={cityDistrictsHref} className={ctaClass('chip')}>
+              City districts
+            </Link>
+            <Link href={downtownDistrictHref} className={ctaClass('chip')}>
+              Downtown district
+            </Link>
+          </div>
           {!userId && (
             <div className="rounded-md border border-slate-800 bg-slate-900/70 px-3 py-3 text-sm text-slate-100 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
@@ -1129,16 +1515,35 @@ export default function HomePageClient() {
               </button>
             </div>
           )}
+          {userId ? (
+            <div className="flex justify-end">
+              <button type="button" onClick={handleScrollToAuth} className={ctaClass('chip')}>
+                Account
+              </button>
+            </div>
+          ) : null}
         </header>
         {migrationMessage ? (
           <div className="rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2 text-[11px] text-emerald-100">
             {migrationMessage}
           </div>
         ) : null}
+        {noticeMessage ? (
+          <div className="rounded-md border border-slate-700/70 bg-slate-900/70 px-3 py-2 text-[11px] text-slate-200">
+            <div className="flex items-center justify-between gap-3">
+              <span>{noticeMessage}</span>
+              <button
+                type="button"
+                onClick={() => setNoticeMessage(null)}
+                className="text-[10px] text-slate-400 hover:text-slate-200"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ) : null}
 
-        <div ref={authPanelRef}>
-          <AuthPanel />
-        </div>
+        <div ref={authPanelRef}>{showAuthPanel ? <AuthPanel /> : null}</div>
 
         {/* TEMP/DEV: Share link generator */}
         {showDevTools && (
@@ -1170,6 +1575,176 @@ export default function HomePageClient() {
         )}
       </div>
     )}
+
+        <section className="space-y-2 rounded-md border border-slate-800 bg-slate-900/50 px-4 py-3">
+          <h2 className="text-sm font-semibold text-slate-200">Toolkits</h2>
+          <p className="text-[11px] text-slate-500">
+            Focused launchers that start a plan with a specific lens.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/toolkits/restaurant" className={`${ctaClass('primary')} text-[11px]`}>
+              Restaurant Toolkit (V0)
+            </Link>
+            <span className="text-[11px] text-slate-500">More toolkits coming soon.</span>
+          </div>
+        </section>
+
+        <section className="space-y-2 rounded-md border border-slate-800 bg-slate-900/50 px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-200">Modes (Testing)</h2>
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">Testing</span>
+          </div>
+          <p className="text-[11px] text-slate-500">
+            Quick launchers for plan/publish/curate. Uses the selected template when available.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Link href={planModeHref} className={`${ctaClass('primary')} text-[11px]`}>
+              Open in Plan (editable)
+            </Link>
+            <Link href={publishModeHref} className={`${ctaClass('chip')} text-[11px]`}>
+              Open in Publish (read-only)
+            </Link>
+            <Link href={curateModeHref} className={`${ctaClass('chip')} text-[11px]`}>
+              Open in Curate (read-only)
+            </Link>
+          </div>
+        </section>
+
+        {/* Templates */}
+        <section
+          ref={templateSectionRef}
+          className="space-y-3 pt-6 mt-6 border-t border-slate-900/60"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-slate-200">Templates</h2>
+            <button
+              type="button"
+              onClick={() => setShowTemplateExplorer((prev) => !prev)}
+              className={`${ctaClass('chip')} text-[11px]`}
+            >
+              {showTemplateExplorer ? 'Hide templates' : 'Start with a template'}
+            </button>
+          </div>
+          <p className="text-xs text-slate-400">
+            Templates are reusable starting points. Pick one to open it in the editor and customize it.
+          </p>
+          <p className="text-[11px] text-slate-500">
+            You’re building your own plan. Templates just get you started.
+          </p>
+          {templateLoading ? (
+            <p className="text-xs text-slate-400">Loading templates...</p>
+          ) : templatePlans.length === 0 ? (
+            <p className="text-xs text-slate-400">
+              No templates yet. Convert a plan to a template to reuse it later.
+            </p>
+          ) : showTemplateExplorer ? (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <p className="text-xs text-slate-400">Template packs</p>
+                <div className="flex flex-wrap gap-2">
+                  {templatePacks.map((pack) => (
+                    <button
+                      key={pack.id}
+                      type="button"
+                      onClick={() => handleSelectTemplatePack(pack.id)}
+                      className={`rounded-full border px-3 py-1 text-[11px] ${
+                        activeTemplatePackId === pack.id
+                          ? 'border-slate-100 bg-slate-100 text-slate-900'
+                          : 'border-slate-700 text-slate-300 hover:text-slate-100'
+                      }`}
+                    >
+                      {pack.title || 'Untitled pack'} ({pack.count})
+                    </button>
+                  ))}
+                </div>
+                {activeTemplatePack ? (
+                  <p className="text-[11px] text-slate-500">
+                    {activeTemplatePack.description || 'Pick a template to start a new plan.'}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-slate-400">
+                    {activeTemplatePack ? activeTemplatePack.title : 'All templates'}
+                  </p>
+                  {activeTemplatePackId ? (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTemplatePackId(null)}
+                      className="text-[11px] text-slate-400 hover:text-slate-200"
+                    >
+                      Clear pack
+                    </button>
+                  ) : null}
+                </div>
+                {templatesInActivePack.length === 0 ? (
+                  <p className="text-xs text-slate-500">No templates in this pack yet.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {templatesInActivePack.map((template) => (
+                      <li
+                        key={template.id}
+                        className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="space-y-0.5 min-w-0 w-full">
+                          <p
+                            className="font-medium text-slate-100 truncate"
+                            title={template.templateTitle || template.title || 'Untitled template'}
+                          >
+                            {template.templateTitle || template.title || 'Untitled template'}
+                          </p>
+                          <div
+                            className="flex items-center gap-2 text-[11px] text-slate-400 truncate"
+                            title={new Date(template.updatedAt).toLocaleString()}
+                          >
+                            <span>Updated {new Date(template.updatedAt).toLocaleString()}</span>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5 justify-start sm:justify-end w-full sm:w-auto">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenTemplatePreview(template)}
+                            className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                          >
+                            Preview
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleUseTemplate(template)}
+                            className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                          >
+                            Use template
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                            router.push(
+                                withPreservedModeParam(
+                                  `/create?planId=${encodeURIComponent(template.id)}&editTemplate=1&returnTo=${encodeURIComponent(returnTo)}`,
+                                  searchParams
+                                )
+                              )
+                            }
+                            className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                            disabled={!userId}
+                          >
+                            Edit template
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-400">
+              Start with a template to explore packs and reuse plans.
+            </p>
+          )}
+        </section>
 
         {/* Plans (recent + saved toggle) */}
         <section className="space-y-3 pt-6 mt-6 border-t border-slate-900/60">
@@ -1237,7 +1812,12 @@ export default function HomePageClient() {
                       type="button"
                       onClick={() => {
                         if (!plan.encoded) return;
-                        router.push(`/plan?p=${encodeURIComponent(plan.encoded)}`);
+                        router.push(
+                          withPreservedModeParam(
+                            `/plan?p=${encodeURIComponent(plan.encoded)}`,
+                            searchParams
+                          )
+                        );
                       }}
                       className={`${ctaClass('chip')} shrink-0 text-[10px]`}
                     >
@@ -1249,9 +1829,15 @@ export default function HomePageClient() {
                         if (!plan.encoded) return;
                         try {
                           deserializePlan(plan.encoded);
-                          const origin = `/plan?p=${encodeURIComponent(plan.encoded)}`;
+                          const origin = withPreservedModeParam(
+                            `/plan?p=${encodeURIComponent(plan.encoded)}`,
+                            searchParams
+                          );
                           router.push(
-                            `/create?from=${encodeURIComponent(plan.encoded)}&origin=${encodeURIComponent(origin)}`
+                            withPreservedModeParam(
+                              `/create?from=${encodeURIComponent(plan.encoded)}&origin=${encodeURIComponent(origin)}`,
+                              searchParams
+                            )
                           );
                         } catch {
                           // ignore invalid payload
@@ -1367,6 +1953,96 @@ export default function HomePageClient() {
         )}
         </section>
 
+        {selectedTemplate ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4">
+            <div className="w-full max-w-lg rounded-xl border border-slate-800 bg-slate-950 px-4 py-4 space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Template preview</p>
+                  <p className="text-[11px] text-slate-400">Read-only preview</p>
+                  <h3 className="text-lg font-semibold text-slate-100">
+                    {selectedTemplate.templateTitle ||
+                      selectedTemplate.title ||
+                      'Untitled template'}
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Pack: {selectedTemplate.packTitle || 'Templates'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCloseTemplatePreview}
+                  className="text-xs text-slate-400 hover:text-slate-200"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs text-slate-400">Stops</p>
+                {selectedTemplatePlan?.stops?.length ? (
+                  <ol className="space-y-2">
+                    {selectedTemplatePlan.stops.map((stop) => (
+                      <li key={stop.id} className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2">
+                        <div className="text-sm text-slate-100">{stop.name}</div>
+                        {stop.notes ? (
+                          <div className="text-[11px] text-slate-400">{stop.notes}</div>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="text-xs text-slate-500">No stops yet.</p>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleUseTemplate(selectedTemplate);
+                    setSelectedTemplate(null);
+                  }}
+                  className={`${ctaClass('primary')} text-[11px]`}
+                >
+                  Edit this plan
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    router.push(
+                      withPreservedModeParam(
+                        `/create?planId=${encodeURIComponent(selectedTemplate.id)}&editTemplate=1&returnTo=${encodeURIComponent(returnTo)}`,
+                        searchParams
+                      )
+                    )
+                  }
+                  className={`${ctaClass('primary')} text-[11px]`}
+                  disabled={!userId}
+                >
+                  Edit this template
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCloseTemplatePreview}
+                  className={`${ctaClass('chip')} text-[11px]`}
+                >
+                  Back to templates
+                </button>
+                {userId ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteTemplate(selectedTemplate)}
+                    className={`${ctaClass('danger')} text-[11px]`}
+                  >
+                    Delete template
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {/* Discovery: Start a Waypoint */}
         <section className="space-y-3 rounded-lg border border-slate-900/70 bg-slate-900/40 px-3 py-3">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -1376,7 +2052,9 @@ export default function HomePageClient() {
           <div className="space-y-3">
             <div className="space-y-2">
               <p className="text-[11px] uppercase tracking-wide text-slate-500">Ways to begin</p>
-              <p className="text-[11px] text-slate-500">Pick a starting point to shape your plan quickly.</p>
+              <p className="text-[11px] text-slate-500">
+                Choose a starter to prefill a plan you can tweak.
+              </p>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {starterOptions.map((starter) => {
                   const isSelected = selectedStarter?.id === starter.id;
@@ -1752,6 +2430,16 @@ export default function HomePageClient() {
                     : (item.saved.useCases as UseCaseTag[] | undefined);
 
                 const isSaved = savedWaypoints.some((wp) => wp.id === id);
+                const origin = item.source === 'saved' ? deriveOrigin(item.saved) : null;
+                const originLine = origin
+                  ? origin.originType === 'District'
+                    ? `${origin.primaryLabel} · ${origin.secondaryLabel ?? ''}`.trim()
+                    : origin.originType === 'City'
+                    ? origin.primaryLabel
+                    : origin.originType === 'Template'
+                    ? `Template · ${origin.primaryLabel}`
+                    : `Search · "${origin.primaryLabel}"`
+                  : null;
                 const discoverySignal = buildDiscoverySignal({
                   query: queryFromUrl,
                   moodFilter: moodFromUrl,
@@ -1799,7 +2487,17 @@ export default function HomePageClient() {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="space-y-1">
-                        <h2 className="text-sm font-medium">{name}</h2>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h2 className="text-sm font-medium">{name}</h2>
+                          {origin ? (
+                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[10px] text-slate-300">
+                              {origin.originType}
+                            </span>
+                          ) : null}
+                        </div>
+                        {originLine ? (
+                          <p className="text-[11px] text-slate-500 truncate">{originLine}</p>
+                        ) : null}
                         {description && (
                           <p className="text-xs text-slate-400">{description}</p>
                         )}
@@ -1847,13 +2545,21 @@ export default function HomePageClient() {
                       </div>
                     </div>
 
-                    <div className="flex justify-end">
+                    <div className="flex items-center justify-end gap-2">
+                      {origin?.originHref ? (
+                        <Link
+                          href={origin.originHref}
+                          className={`${ctaClass('chip')} text-[11px]`}
+                        >
+                          Explore
+                        </Link>
+                      ) : null}
                       <button
                         type="button"
                         onClick={onPlanClick}
                         className={`${ctaClass('primary')} text-[11px]`}
                       >
-                        Plan this
+                        Resume
                       </button>
                     </div>
                   </li>

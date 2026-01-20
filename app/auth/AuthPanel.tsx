@@ -1,31 +1,17 @@
 'use client';
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useState, type FormEvent } from 'react';
 import { getSupabaseBrowserClient } from '../lib/supabaseBrowserClient';
 import { ctaClass } from '../ui/cta';
+import { useSession } from './SessionProvider';
 
 export default function AuthPanel() {
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  const { user, loading } = useSession();
   const [email, setEmail] = useState('');
   const [status, setStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
-  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setUserEmail(data.session?.user.email ?? null);
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserEmail(session?.user.email ?? null);
-    });
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, [supabase]);
+  const userEmail = user?.email ?? null;
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -54,13 +40,13 @@ export default function AuthPanel() {
     setEmail('');
     setErrorMessage(null);
     setStatus('idle');
-    setUserEmail(null);
   }
 
   return (
     <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 space-y-2">
       <div className="flex items-center justify-between">
         <span className="font-semibold text-slate-50">Auth</span>
+        {loading ? <span className="text-[11px] text-slate-500">Checking session...</span> : null}
       </div>
       {userEmail ? (
         <div className="flex items-center gap-2">

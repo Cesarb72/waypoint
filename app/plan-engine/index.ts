@@ -10,6 +10,6 @@ export {
 } from './starters';
 export * as v6Starters from './v6/starters';
 export { promoteStarterToPlan } from './promotion';
-export { createEmptyPlan, createPlanFromTemplate } from './defaults';
+export { createEmptyPlan, createPlanFromTemplate, createPlanFromTemplatePlan } from './defaults';
 export { validatePlan } from './validate';
 export { serializePlan, deserializePlan } from './serialize';
