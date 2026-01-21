@@ -64,6 +64,7 @@ export default function PlanPage() {
   const [plan, setPlan] = useState<PlanDraft | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const SHARE_ENABLED = false;
   const loggedRouteRef = useRef(false);
   const loggedPlanRef = useRef<string | null>(null);
   const loggedOriginPlanRef = useRef<string | null>(null);
@@ -827,14 +828,16 @@ export default function PlanPage() {
               Cancel
             </button>
 
-            <button
-              type="button"
-              onClick={handleShareClick}
-              disabled={isSaving}
-              className="rounded-lg border border-violet-400/70 bg-violet-500/30 px-4 py-2 text-sm font-semibold text-violet-50 hover:bg-violet-500/40 disabled:opacity-60"
-            >
-              {isSaving ? 'Sharing…' : 'Share this version'}
-            </button>
+            {SHARE_ENABLED ? (
+              <button
+                type="button"
+                onClick={handleShareClick}
+                disabled={isSaving}
+                className="rounded-lg border border-violet-400/70 bg-violet-500/30 px-4 py-2 text-sm font-semibold text-violet-50 hover:bg-violet-500/40 disabled:opacity-60"
+              >
+                {isSaving ? 'Sharing…' : 'Share this version'}
+              </button>
+            ) : null}
 
             <button
               type="submit"

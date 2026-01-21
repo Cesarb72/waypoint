@@ -193,6 +193,7 @@ export default function HomePageClient() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const showDevTools = process.env.NEXT_PUBLIC_SHOW_DEV_TOOLS === '1';
+  const SHARE_ENABLED = false;
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const { user } = useSession();
   const userId = user?.id ?? null;
@@ -1574,7 +1575,7 @@ export default function HomePageClient() {
         <div ref={authPanelRef}>{showAuthPanel ? <AuthPanel /> : null}</div>
 
         {/* TEMP/DEV: Share link generator */}
-        {showDevTools && (
+        {showDevTools && SHARE_ENABLED && (
           <div className="rounded-md border border-dashed border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-300 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <div>
@@ -1841,7 +1842,10 @@ export default function HomePageClient() {
                       onClick={() => {
                         if (!plan.encoded) return;
                         router.push(
-                          withPreservedModeParam(`/plan/${encodeURIComponent(plan.id)}`, searchParams)
+                          withPreservedModeParam(
+                            `/plans/${encodeURIComponent(plan.id)}`,
+                            searchParams
+                          )
                         );
                       }}
                       className={`${ctaClass('chip')} shrink-0 text-[10px]`}
@@ -1872,13 +1876,15 @@ export default function HomePageClient() {
                     >
                       Edit
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => handleShareRecentV2Plan(plan)}
-                      className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                    >
-                      Share this version
-                    </button>
+                    {SHARE_ENABLED ? (
+                      <button
+                        type="button"
+                        onClick={() => handleShareRecentV2Plan(plan)}
+                        className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                      >
+                        Share this version
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => handleRemoveRecentV2(plan.id)}
@@ -1968,20 +1974,24 @@ export default function HomePageClient() {
                     >
                       Edit
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => handleViewDetails(plan)}
-                      className="shrink-0 rounded-md border border-indigo-500/70 bg-indigo-600/20 px-2 py-1 text-[10px] font-semibold text-indigo-50 hover:bg-indigo-600/30"
-                    >
-                      Details
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSharePlan(plan)}
-                      className="shrink-0 rounded-md border border-fuchsia-500/70 bg-fuchsia-600/20 px-2 py-1 text-[10px] font-semibold text-fuchsia-50 hover:bg-fuchsia-600/30"
-                    >
-                      Share this version
-                    </button>
+                    {SHARE_ENABLED ? (
+                      <button
+                        type="button"
+                        onClick={() => handleViewDetails(plan)}
+                        className="shrink-0 rounded-md border border-indigo-500/70 bg-indigo-600/20 px-2 py-1 text-[10px] font-semibold text-indigo-50 hover:bg-indigo-600/30"
+                      >
+                        Details
+                      </button>
+                    ) : null}
+                    {SHARE_ENABLED ? (
+                      <button
+                        type="button"
+                        onClick={() => handleSharePlan(plan)}
+                        className="shrink-0 rounded-md border border-fuchsia-500/70 bg-fuchsia-600/20 px-2 py-1 text-[10px] font-semibold text-fuchsia-50 hover:bg-fuchsia-600/30"
+                      >
+                        Share this version
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => handleRemovePlan(plan.id)}

@@ -229,6 +229,7 @@ export default function CreatePlanClient({
   const [showReadOnlyHint, setShowReadOnlyHint] = useState(false);
   const [invalidFromError, setInvalidFromError] = useState(false);
   const [planOwnerId, setPlanOwnerId] = useState<string | null>(null);
+  const SHARE_ENABLED = false;
   const viewModeRef = useRef<{ mode: ViewMode; planId: string | null } | null>(null);
   const hasPrefilledFromSource = useRef(false);
   const originInitRef = useRef(false);
@@ -2326,23 +2327,27 @@ export default function CreatePlanClient({
                   {isTemplatePlan ? 'Update template' : 'Save as template'}
                 </button>
               ) : null}
-              <button
-                type="button"
-                onClick={handleOpenShare}
-                className={`${ctaClass('chip')} text-[11px]`}
-                disabled={!encodedPath}
-              >
-                Preview share link
-              </button>
-              <button
-                type="button"
-                onClick={handleCopyShare}
-                className={`${ctaClass(isReadOnly ? 'primary' : 'chip')} text-[11px]`}
-                disabled={!encodedFullUrl}
-              >
-                Share this version
-              </button>
-              {hasShared ? (
+              {SHARE_ENABLED ? (
+                <button
+                  type="button"
+                  onClick={handleOpenShare}
+                  className={`${ctaClass('chip')} text-[11px]`}
+                  disabled={!encodedPath}
+                >
+                  Preview share link
+                </button>
+              ) : null}
+              {SHARE_ENABLED ? (
+                <button
+                  type="button"
+                  onClick={handleCopyShare}
+                  className={`${ctaClass(isReadOnly ? 'primary' : 'chip')} text-[11px]`}
+                  disabled={!encodedFullUrl}
+                >
+                  Share this version
+                </button>
+              ) : null}
+              {SHARE_ENABLED && hasShared ? (
                 <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
                   Shared
                 </span>
