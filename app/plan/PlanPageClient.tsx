@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   upsertPlan,
   type StoredStop,
@@ -48,8 +48,10 @@ function createStop(label: string = 'Main stop'): Stop {
 export default function PlanPage() {
   const router = useRouter();
   const params = useSearchParams();
+  const routeParams = useParams<{ planId?: string }>();
 
-  const urlPlanId = params.get('planId');
+  const routePlanId = typeof routeParams?.planId === 'string' ? routeParams.planId : null;
+  const urlPlanId = params.get('planId') ?? routePlanId;
   const waypointName = params.get('name') ?? '';
   const waypointLocation = params.get('location') ?? '';
 

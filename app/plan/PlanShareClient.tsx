@@ -230,6 +230,9 @@ export default function PlanShareClient() {
 
   const createCopyHref = useMemo(() => {
     if (!encoded) return null;
+    if (plan?.id) {
+      return `/plan/${encodeURIComponent(plan.id)}`;
+    }
     const params = new URLSearchParams();
     params.set('from', encoded);
     if (sharePath) {

@@ -974,13 +974,41 @@ export default function HomePageClient() {
     setSurpriseError(null);
   }
 
+  function buildSharePlanFromStored(plan: StoredPlan): Plan {
+    const stops: Stop[] = (plan.stops ?? []).map((stop, index) => ({
+      id: stop.id ?? `${plan.id}-stop-${index + 1}`,
+      name: stop.label || `Stop ${index + 1}`,
+      role: index === 0 ? 'anchor' : 'support',
+      optionality: 'required',
+      notes: stop.notes || undefined,
+      duration: stop.time || undefined,
+    }));
+
+    return {
+      id: plan.id,
+      version: '2.0',
+      title: plan.title || 'Untitled plan',
+      intent: plan.notes || '',
+      audience: plan.attendees || '',
+      stops,
+      presentation: {
+        shareModes: ['link', 'qr', 'embed'],
+      },
+      metadata: {
+        createdAt: plan.createdAt,
+        lastUpdated: plan.updatedAt,
+      },
+    };
+  }
+
   // Helper to build a share URL for a plan
-  function getPlanShareUrl(planId: string): string {
+  function getPlanShareUrl(plan: StoredPlan): string {
+    const encoded = serializePlan(buildSharePlanFromStored(plan));
     if (typeof window !== 'undefined') {
-      return `${window.location.origin}/p/${encodeURIComponent(planId)}`;
+      return `${window.location.origin}/plan?p=${encodeURIComponent(encoded)}`;
     }
     // Fallback for SSR  still a valid relative link
-    return `/p/${encodeURIComponent(planId)}`;
+    return `/plan?p=${encodeURIComponent(encoded)}`;
   }
 
   //  Re-open an existing plan in Calendar
@@ -1131,7 +1159,7 @@ export default function HomePageClient() {
 
   //  Share a plan via link (MVP: copy link and/or open)
   function handleSharePlan(plan: StoredPlan) {
-    const url = getPlanShareUrl(plan.id);
+    const url = getPlanShareUrl(plan);
 
     // Try clipboard first if available
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
@@ -1813,10 +1841,7 @@ export default function HomePageClient() {
                       onClick={() => {
                         if (!plan.encoded) return;
                         router.push(
-                          withPreservedModeParam(
-                            `/plan?p=${encodeURIComponent(plan.encoded)}`,
-                            searchParams
-                          )
+                          withPreservedModeParam(`/plan/${encodeURIComponent(plan.id)}`, searchParams)
                         );
                       }}
                       className={`${ctaClass('chip')} shrink-0 text-[10px]`}
