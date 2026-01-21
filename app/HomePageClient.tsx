@@ -194,6 +194,7 @@ export default function HomePageClient() {
   const searchParams = useSearchParams();
   const showDevTools = process.env.NEXT_PUBLIC_SHOW_DEV_TOOLS === '1';
   const SHARE_ENABLED = false;
+  const TEMPLATES_ENABLED = false;
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const { user } = useSession();
   const userId = user?.id ?? null;
@@ -1552,6 +1553,9 @@ export default function HomePageClient() {
             </div>
           ) : null}
         </header>
+        <div className="rounded-md border border-slate-800 bg-slate-900/50 px-3 py-2 text-[11px] text-slate-300">
+          You’re here to explore. Nothing you do here commits you — just browse, follow your curiosity, and look around.
+        </div>
         {migrationMessage ? (
           <div className="rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2 text-[11px] text-emerald-100">
             {migrationMessage}
@@ -1574,331 +1578,286 @@ export default function HomePageClient() {
 
         <div ref={authPanelRef}>{showAuthPanel ? <AuthPanel /> : null}</div>
 
-        {/* TEMP/DEV: Share link generator */}
-        {showDevTools && SHARE_ENABLED && (
-          <div className="rounded-md border border-dashed border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-300 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <p className="font-semibold text-slate-100">Dev tools</p>
-                <p>Generate and open a prebuilt shared plan.</p>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleOpenSharedView}
-                  className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1 text-[11px] font-medium text-slate-100 hover:bg-slate-750"
-                >
-                  Open shared view
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCopyLink}
-                  className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1 text-[11px] font-medium text-slate-100 hover:bg-slate-750"
-                >
-                  Copy link
-                </button>
-              </div>
+        <section className="rounded-md border border-slate-800 bg-slate-900/50 px-4 py-3 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-slate-200">Create a plan</p>
+              <p className="text-[11px] text-slate-500">
+                Step into Create when you're ready to author. Templates and starting points live there.
+              </p>
             </div>
-        {copyStatus === 'copied' && (
-          <p className="text-[11px] text-slate-200">Copied!</p>
-        )}
-      </div>
-    )}
-
-        <section className="space-y-2 rounded-md border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <h2 className="text-sm font-semibold text-slate-200">Toolkits</h2>
-          <p className="text-[11px] text-slate-500">
-            Focused launchers that start a plan with a specific lens.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Link href="/toolkits/restaurant" className={`${ctaClass('primary')} text-[11px]`}>
-              Restaurant Toolkit (V0)
-            </Link>
-            <span className="text-[11px] text-slate-500">More toolkits coming soon.</span>
-          </div>
-        </section>
-
-        <section className="space-y-2 rounded-md border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-sm font-semibold text-slate-200">Modes (Testing)</h2>
-            <span className="text-[10px] uppercase tracking-wide text-slate-500">Testing</span>
-          </div>
-          <p className="text-[11px] text-slate-500">
-            Quick launchers for plan/publish/curate. Uses the selected template when available.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Link href={planModeHref} className={`${ctaClass('primary')} text-[11px]`}>
-              Open in Plan (editable)
-            </Link>
-            <Link href={publishModeHref} className={`${ctaClass('chip')} text-[11px]`}>
-              Open in Publish (read-only)
-            </Link>
-            <Link href={curateModeHref} className={`${ctaClass('chip')} text-[11px]`}>
-              Open in Curate (read-only)
+            <Link href="/create" className={ctaClass('primary')}>
+              Create a plan
             </Link>
           </div>
         </section>
 
-        {/* Templates */}
-        <section
-          ref={templateSectionRef}
-          className="space-y-3 pt-6 mt-6 border-t border-slate-900/60"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-slate-200">Templates</h2>
-            <button
-              type="button"
-              onClick={() => setShowTemplateExplorer((prev) => !prev)}
-              className={`${ctaClass('chip')} text-[11px]`}
-            >
-              {showTemplateExplorer ? 'Hide templates' : 'Start with a template'}
-            </button>
-          </div>
-          <p className="text-xs text-slate-400">
-            Templates are reusable starting points. Pick one to open it in the editor and customize it.
-          </p>
-          <p className="text-[11px] text-slate-500">
-            You’re building your own plan. Templates just get you started.
-          </p>
-          {templateLoading ? (
-            <p className="text-xs text-slate-400">Loading templates...</p>
-          ) : templatePlans.length === 0 ? (
+        {TEMPLATES_ENABLED ? (
+          <section
+            ref={templateSectionRef}
+            className="space-y-3 pt-6 mt-6 border-t border-slate-900/60"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-slate-200">Templates</h2>
+              <button
+                type="button"
+                onClick={() => setShowTemplateExplorer((prev) => !prev)}
+                className={`${ctaClass('chip')} text-[11px]`}
+              >
+                {showTemplateExplorer ? 'Hide templates' : 'Start with a template'}
+              </button>
+            </div>
             <p className="text-xs text-slate-400">
-              No templates yet. Convert a plan to a template to reuse it later.
+              Templates are reusable starting points. Pick one to open it in the editor and customize it.
             </p>
-          ) : showTemplateExplorer ? (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <p className="text-xs text-slate-400">Template packs</p>
-                <div className="flex flex-wrap gap-2">
-                  {templatePacks.map((pack) => (
-                    <button
-                      key={pack.id}
-                      type="button"
-                      onClick={() => handleSelectTemplatePack(pack.id)}
-                      className={`rounded-full border px-3 py-1 text-[11px] ${
-                        activeTemplatePackId === pack.id
-                          ? 'border-slate-100 bg-slate-100 text-slate-900'
-                          : 'border-slate-700 text-slate-300 hover:text-slate-100'
-                      }`}
-                    >
-                      {pack.title || 'Untitled pack'} ({pack.count})
-                    </button>
-                  ))}
-                </div>
-                {activeTemplatePack ? (
-                  <p className="text-[11px] text-slate-500">
-                    {activeTemplatePack.description || 'Pick a template to start a new plan.'}
-                  </p>
-                ) : null}
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-slate-400">
-                    {activeTemplatePack ? activeTemplatePack.title : 'All templates'}
-                  </p>
-                  {activeTemplatePackId ? (
-                    <button
-                      type="button"
-                      onClick={() => setActiveTemplatePackId(null)}
-                      className="text-[11px] text-slate-400 hover:text-slate-200"
-                    >
-                      Clear pack
-                    </button>
+            <p className="text-[11px] text-slate-500">
+              You're building your own plan. Templates just get you started.
+            </p>
+            {templateLoading ? (
+              <p className="text-xs text-slate-400">Loading templates...</p>
+            ) : templatePlans.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                No templates yet. Convert a plan to a template to reuse it later.
+              </p>
+            ) : showTemplateExplorer ? (
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <p className="text-xs text-slate-400">Template packs</p>
+                  <div className="flex flex-wrap gap-2">
+                    {templatePacks.map((pack) => (
+                      <button
+                        key={pack.id}
+                        type="button"
+                        onClick={() => handleSelectTemplatePack(pack.id)}
+                        className={`rounded-full border px-3 py-1 text-[11px] ${
+                          activeTemplatePackId === pack.id
+                            ? 'border-slate-100 bg-slate-100 text-slate-900'
+                            : 'border-slate-700 text-slate-300 hover:text-slate-100'
+                        }`}
+                      >
+                        {pack.title || 'Untitled pack'} ({pack.count})
+                      </button>
+                    ))}
+                  </div>
+                  {activeTemplatePack ? (
+                    <p className="text-[11px] text-slate-500">
+                      {activeTemplatePack.description || 'Pick a template to start a new plan.'}
+                    </p>
                   ) : null}
                 </div>
-                {templatesInActivePack.length === 0 ? (
-                  <p className="text-xs text-slate-500">No templates in this pack yet.</p>
-                ) : (
-                  <ul className="space-y-2">
-                    {templatesInActivePack.map((template) => (
-                      <li
-                        key={template.id}
-                        className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-slate-400">
+                      {activeTemplatePack ? activeTemplatePack.title : 'All templates'}
+                    </p>
+                    {activeTemplatePackId ? (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTemplatePackId(null)}
+                        className="text-[11px] text-slate-400 hover:text-slate-200"
                       >
-                        <div className="space-y-0.5 min-w-0 w-full">
-                          <p
-                            className="font-medium text-slate-100 truncate"
-                            title={template.templateTitle || template.title || 'Untitled template'}
-                          >
-                            {template.templateTitle || template.title || 'Untitled template'}
-                          </p>
-                          <div
-                            className="flex items-center gap-2 text-[11px] text-slate-400 truncate"
-                            title={new Date(template.updatedAt).toLocaleString()}
-                          >
-                            <span>Updated {new Date(template.updatedAt).toLocaleString()}</span>
+                        Clear pack
+                      </button>
+                    ) : null}
+                  </div>
+                  {templatesInActivePack.length === 0 ? (
+                    <p className="text-xs text-slate-500">No templates in this pack yet.</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {templatesInActivePack.map((template) => (
+                        <li
+                          key={template.id}
+                          className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
+                        >
+                          <div className="space-y-0.5 min-w-0 w-full">
+                            <p
+                              className="font-medium text-slate-100 truncate"
+                              title={template.templateTitle || template.title || 'Untitled template'}
+                            >
+                              {template.templateTitle || template.title || 'Untitled template'}
+                            </p>
+                            <div
+                              className="flex items-center gap-2 text-[11px] text-slate-400 truncate"
+                              title={new Date(template.updatedAt).toLocaleString()}
+                            >
+                              <span>Updated {new Date(template.updatedAt).toLocaleString()}</span>
+                            </div>
                           </div>
-                        </div>
-                        <div className="flex flex-wrap gap-1.5 justify-start sm:justify-end w-full sm:w-auto">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenTemplatePreview(template)}
-                            className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                          >
-                            Preview
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleUseTemplate(template)}
-                            className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                          >
-                            Use template
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                            router.push(
-                                withPreservedModeParam(
-                                  `/create?planId=${encodeURIComponent(template.id)}&editTemplate=1&returnTo=${encodeURIComponent(returnTo)}`,
-                                  searchParams
+                          <div className="flex flex-wrap gap-1.5 justify-start sm:justify-end w-full sm:w-auto">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenTemplatePreview(template)}
+                              className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                            >
+                              Preview
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleUseTemplate(template)}
+                              className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                            >
+                              Use template
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                              router.push(
+                                  withPreservedModeParam(
+                                    `/create?planId=${encodeURIComponent(template.id)}&editTemplate=1&returnTo=${encodeURIComponent(returnTo)}`,
+                                    searchParams
+                                  )
                                 )
-                              )
-                            }
-                            className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                            disabled={!userId}
-                          >
-                            Edit template
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                              }
+                              className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                              disabled={!userId}
+                            >
+                              Edit template
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400">
+                Start with a template to explore packs and reuse plans.
+              </p>
+            )}
+          </section>
+        ) : null}
+
+        <section className="space-y-3 pt-6 mt-6 border-t border-slate-900/60">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Continue
+          </h2>
+          {/* Plans (recent + saved toggle) */}
+          <section className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-200">{waypointHeaderLabel}</h3>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-500">View:</span>
+                <button
+                  type="button"
+                  onClick={() => setRecentShowSavedOnly(false)}
+                  className={`text-[11px] rounded-full px-3 py-1 border ${
+                    recentShowSavedOnly
+                      ? 'border-slate-700 text-slate-400 hover:text-slate-200'
+                      : 'border-slate-100 bg-slate-100 text-slate-900'
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRecentShowSavedOnly(true)}
+                  className={`text-[11px] rounded-full px-3 py-1 border ${
+                    recentShowSavedOnly
+                      ? 'border-slate-100 bg-slate-100 text-slate-900'
+                      : 'border-slate-700 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Saved
+                </button>
               </div>
             </div>
-          ) : (
-            <p className="text-xs text-slate-400">
-              Start with a template to explore packs and reuse plans.
-            </p>
-          )}
-        </section>
-
-        {/* Plans (recent + saved toggle) */}
-        <section className="space-y-3 pt-6 mt-6 border-t border-slate-900/60">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-slate-200">{waypointHeaderLabel}</h2>
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-slate-500">View:</span>
-              <button
-                type="button"
-                onClick={() => setRecentShowSavedOnly(false)}
-                className={`text-[11px] rounded-full px-3 py-1 border ${
-                  recentShowSavedOnly
-                    ? 'border-slate-700 text-slate-400 hover:text-slate-200'
-                    : 'border-slate-100 bg-slate-100 text-slate-900'
-                }`}
-              >
-                All
-              </button>
-              <button
-                type="button"
-                onClick={() => setRecentShowSavedOnly(true)}
-                className={`text-[11px] rounded-full px-3 py-1 border ${
-                  recentShowSavedOnly
-                    ? 'border-slate-100 bg-slate-100 text-slate-900'
-                    : 'border-slate-700 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Saved
-              </button>
-            </div>
-          </div>
-          {migrationMessage ? (
-            <div className="rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2 text-[11px] text-emerald-100">
-              {migrationMessage}
-            </div>
-          ) : null}
-          {userId && supabaseLoading ? (
-            <p className="text-xs text-slate-400">Loading your Waypoints...</p>
-          ) : recentV2Plans.length === 0 ? (
-            <p className="text-xs text-slate-400">
-              No Waypoints yet. Try searching, then plan or share a result to populate this list.
-            </p>
-          ) : (
-            <ul className="space-y-2">
-              {recentV2Plans.map((plan) => (
-                <li
-                  key={plan.id}
-                  className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="space-y-0.5 min-w-0 w-full">
-                    <p className="font-medium text-slate-100 truncate" title={plan.title}>
-                      {plan.title}
-                    </p>
-                    <div className="flex items-center gap-2 text-[11px] text-slate-400 truncate" title={new Date(plan.updatedAt).toLocaleString()}>
-                      <span>Updated {new Date(plan.updatedAt).toLocaleString()}</span>
-                      {plan.isShared ? (
-                        <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
-                          Shared
-                        </span>
-                      ) : null}
+            {migrationMessage ? (
+              <div className="rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2 text-[11px] text-emerald-100">
+                {migrationMessage}
+              </div>
+            ) : null}
+            {userId && supabaseLoading ? (
+              <p className="text-xs text-slate-400">Loading your Waypoints...</p>
+            ) : recentV2Plans.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                No Waypoints yet. Try searching, then plan or share a result to populate this list.
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {recentV2Plans.map((plan) => (
+                  <li
+                    key={plan.id}
+                    className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="space-y-0.5 min-w-0 w-full">
+                      <p className="font-medium text-slate-100 truncate" title={plan.title}>
+                        {plan.title}
+                      </p>
+                      <div className="flex items-center gap-2 text-[11px] text-slate-400 truncate" title={new Date(plan.updatedAt).toLocaleString()}>
+                        <span>Updated {new Date(plan.updatedAt).toLocaleString()}</span>
+                        {plan.isShared ? (
+                          <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
+                            Shared
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 justify-start sm:justify-end w-full sm:w-auto">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!plan.encoded) return;
-                        router.push(
-                          withPreservedModeParam(
-                            `/plans/${encodeURIComponent(plan.id)}`,
-                            searchParams
-                          )
-                        );
-                      }}
-                      className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                    >
-                      Open
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!plan.encoded) return;
-                        try {
-                          deserializePlan(plan.encoded);
-                          const origin = withPreservedModeParam(
-                            `/plan?p=${encodeURIComponent(plan.encoded)}`,
-                            searchParams
-                          );
+                    <div className="flex flex-wrap gap-1.5 justify-start sm:justify-end w-full sm:w-auto">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!plan.encoded) return;
                           router.push(
                             withPreservedModeParam(
-                              `/create?from=${encodeURIComponent(plan.encoded)}&origin=${encodeURIComponent(origin)}`,
+                              `/plans/${encodeURIComponent(plan.id)}`,
                               searchParams
                             )
                           );
-                        } catch {
-                          // ignore invalid payload
-                        }
-                      }}
-                      className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                    >
-                      Edit
-                    </button>
-                    {SHARE_ENABLED ? (
-                      <button
-                        type="button"
-                        onClick={() => handleShareRecentV2Plan(plan)}
+                        }}
                         className={`${ctaClass('chip')} shrink-0 text-[10px]`}
                       >
-                        Share this version
+                        Open
                       </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveRecentV2(plan.id)}
-                      className={`${ctaClass('danger')} shrink-0 text-[10px] ms-2`}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        
-        {/* Recent plans */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!plan.encoded) return;
+                          try {
+                            deserializePlan(plan.encoded);
+                            const origin = withPreservedModeParam(
+                              `/plan?p=${encodeURIComponent(plan.encoded)}`,
+                              searchParams
+                            );
+                            router.push(
+                              withPreservedModeParam(
+                                `/create?from=${encodeURIComponent(plan.encoded)}&origin=${encodeURIComponent(origin)}`,
+                                searchParams
+                              )
+                            );
+                          } catch {
+                            // ignore invalid payload
+                          }
+                        }}
+                        className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                      >
+                        Edit
+                      </button>
+                      {SHARE_ENABLED ? (
+                        <button
+                          type="button"
+                          onClick={() => handleShareRecentV2Plan(plan)}
+                          className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                        >
+                          Share this version
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveRecentV2(plan.id)}
+                        className={`${ctaClass('danger')} shrink-0 text-[10px] ms-2`}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {/* Recent plans */}
           {recentPlans.length > 0 && (
             <div className="space-y-2 pt-3 border-t border-slate-900/50">
               <div className="flex items-center justify-between text-[11px] text-slate-400">
@@ -1912,99 +1871,99 @@ export default function HomePageClient() {
                 </button>
               </div>
 
-            <ul className="space-y-2">
-              {recentPlans.map((plan) => (
-                <li
-                  key={plan.id}
-                  className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex items-center justify-between gap-3"
-                >
-                  <div className="space-y-0.5 min-w-0">
-                    <p className="font-medium text-slate-100 truncate">{plan.title}</p>
-                    <p className="text-[11px] text-slate-400 truncate">
-                      {plan.location ?? 'No location'} A{' '}
-                      {plan.dateTime
-                        ? new Date(plan.dateTime).toLocaleString(undefined, {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: 'numeric',
-                            minute: '2-digit',
-                            hour12: true,
-                          })
-                        : 'No time set'}
-                    </p>
-                    {plan.chosen || plan.completed === true || plan.sentiment ? (
-                      <div className="flex flex-wrap gap-1 text-[10px] text-slate-500">
-                        {plan.chosen ? (
-                          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
-                            Chosen
-                          </span>
-                        ) : null}
-                        {plan.completed === true ? (
-                          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
-                            Completed
-                          </span>
-                        ) : null}
-                        {plan.sentiment ? (
-                          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 capitalize">
-                            {plan.sentiment}
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 justify-end">
-                    <button
-                      type="button"
-                      onClick={() => handleOpenPlanCalendar(plan)}
-                      className="shrink-0 rounded-md border border-emerald-500/70 bg-emerald-600/20 px-2 py-1 text-[10px] font-semibold text-emerald-50 hover:bg-emerald-600/30"
-                    >
-                      Calendar
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenPlanMaps(plan)}
-                      className="shrink-0 rounded-md border border-sky-500/70 bg-sky-600/20 px-2 py-1 text-[10px] font-semibold text-sky-50 hover:bg-sky-600/30"
-                    >
-                      Maps
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleEditPlan(plan)}
-                      className="shrink-0 rounded-md border border-amber-500/70 bg-amber-600/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-600/30"
-                    >
-                      Edit
-                    </button>
-                    {SHARE_ENABLED ? (
+              <ul className="space-y-2">
+                {recentPlans.map((plan) => (
+                  <li
+                    key={plan.id}
+                    className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex items-center justify-between gap-3"
+                  >
+                    <div className="space-y-0.5 min-w-0">
+                      <p className="font-medium text-slate-100 truncate">{plan.title}</p>
+                      <p className="text-[11px] text-slate-400 truncate">
+                        {plan.location ?? 'No location'} A{' '}
+                        {plan.dateTime
+                          ? new Date(plan.dateTime).toLocaleString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: 'numeric',
+                              minute: '2-digit',
+                              hour12: true,
+                            })
+                          : 'No time set'}
+                      </p>
+                      {plan.chosen || plan.completed === true || plan.sentiment ? (
+                        <div className="flex flex-wrap gap-1 text-[10px] text-slate-500">
+                          {plan.chosen ? (
+                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                              Chosen
+                            </span>
+                          ) : null}
+                          {plan.completed === true ? (
+                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                              Completed
+                            </span>
+                          ) : null}
+                          {plan.sentiment ? (
+                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 capitalize">
+                              {plan.sentiment}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 justify-end">
                       <button
                         type="button"
-                        onClick={() => handleViewDetails(plan)}
-                        className="shrink-0 rounded-md border border-indigo-500/70 bg-indigo-600/20 px-2 py-1 text-[10px] font-semibold text-indigo-50 hover:bg-indigo-600/30"
+                        onClick={() => handleOpenPlanCalendar(plan)}
+                        className="shrink-0 rounded-md border border-emerald-500/70 bg-emerald-600/20 px-2 py-1 text-[10px] font-semibold text-emerald-50 hover:bg-emerald-600/30"
                       >
-                        Details
+                        Calendar
                       </button>
-                    ) : null}
-                    {SHARE_ENABLED ? (
                       <button
                         type="button"
-                        onClick={() => handleSharePlan(plan)}
-                        className="shrink-0 rounded-md border border-fuchsia-500/70 bg-fuchsia-600/20 px-2 py-1 text-[10px] font-semibold text-fuchsia-50 hover:bg-fuchsia-600/30"
+                        onClick={() => handleOpenPlanMaps(plan)}
+                        className="shrink-0 rounded-md border border-sky-500/70 bg-sky-600/20 px-2 py-1 text-[10px] font-semibold text-sky-50 hover:bg-sky-600/30"
                       >
-                        Share this version
+                        Maps
                       </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => handleRemovePlan(plan.id)}
-                      className="shrink-0 rounded-md border border-rose-600/70 bg-rose-700/25 px-2 py-1 text-[10px] font-semibold text-rose-50 hover:bg-rose-700/35 ms-2"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+                      <button
+                        type="button"
+                        onClick={() => handleEditPlan(plan)}
+                        className="shrink-0 rounded-md border border-amber-500/70 bg-amber-600/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-600/30"
+                      >
+                        Edit
+                      </button>
+                      {SHARE_ENABLED ? (
+                        <button
+                          type="button"
+                          onClick={() => handleViewDetails(plan)}
+                          className="shrink-0 rounded-md border border-indigo-500/70 bg-indigo-600/20 px-2 py-1 text-[10px] font-semibold text-indigo-50 hover:bg-indigo-600/30"
+                        >
+                          Details
+                        </button>
+                      ) : null}
+                      {SHARE_ENABLED ? (
+                        <button
+                          type="button"
+                          onClick={() => handleSharePlan(plan)}
+                          className="shrink-0 rounded-md border border-fuchsia-500/70 bg-fuchsia-600/20 px-2 py-1 text-[10px] font-semibold text-fuchsia-50 hover:bg-fuchsia-600/30"
+                        >
+                          Share this version
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePlan(plan.id)}
+                        className="shrink-0 rounded-md border border-rose-600/70 bg-rose-700/25 px-2 py-1 text-[10px] font-semibold text-rose-50 hover:bg-rose-700/35 ms-2"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
 
         {selectedTemplate ? (
@@ -2097,166 +2056,6 @@ export default function HomePageClient() {
           </div>
         ) : null}
 
-        {/* Discovery: Start a Waypoint */}
-        <section className="space-y-3 rounded-lg border border-slate-900/70 bg-slate-900/40 px-3 py-3">
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-sm font-semibold text-slate-200">Start a Waypoint</h2>
-            <p className="text-[11px] text-slate-500">Begin with a suggested setup or let us surprise you.</p>
-          </div>
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <p className="text-[11px] uppercase tracking-wide text-slate-500">Ways to begin</p>
-              <p className="text-[11px] text-slate-500">
-                Choose a starter to prefill a plan you can tweak.
-              </p>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {starterOptions.map((starter) => {
-                  const isSelected = selectedStarter?.id === starter.id;
-                  return (
-                    <button
-                      key={starter.id}
-                      type="button"
-                      onClick={() => handleSelectStarter(starter)}
-                      className={`rounded-lg border px-3 py-2 text-left text-sm transition ${
-                        isSelected
-                          ? 'border-sky-500 bg-sky-500/10 text-slate-50'
-                          : 'border-slate-800 bg-slate-900/70 text-slate-200 hover:border-slate-700'
-                      }`}
-                    >
-                      <p className="font-semibold">{starter.intent.primary}</p>
-                      {starter.intent.context ? (
-                        <p className="text-[11px] text-slate-400">{starter.intent.context}</p>
-                      ) : null}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          {selectedStarter && (
-            <div className="space-y-2 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2">
-              <p className="text-xs text-slate-300">
-                Selected:{' '}
-                <span className="font-semibold text-slate-100">
-                  {selectedStarter.intent.primary}
-                </span>
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleStartSelectedStarter}
-                  disabled={isPromotingStarter}
-                  className={`${ctaClass('primary')} text-[11px] ${
-                    isPromotingStarter ? 'opacity-70 cursor-not-allowed' : ''
-                  }`}
-                >
-                  {isPromotingStarter
-                    ? 'Preparing starter'
-                    : userId
-                    ? 'Start planning'
-                    : 'Preview this starter'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleClearSelectedStarter}
-                  className={`${ctaClass('chip')} text-[11px]`}
-                >
-                  Clear
-                </button>
-              </div>
-              {pendingStarterMessage && (
-                <p className="text-[11px] text-slate-400">{pendingStarterMessage}</p>
-              )}
-            </div>
-          )}
-        </section>
-
-        {surprisePlan || surpriseError ? (
-          <section className="space-y-2 rounded-md border border-violet-700/50 bg-violet-900/30 px-3 py-3">
-            <p className="text-sm font-semibold text-slate-100">Surprise preview</p>
-
-                {surpriseError ? (
-              <div className="text-[12px] text-amber-100">
-                {surpriseError}{' '}
-                <button
-                  type="button"
-                  onClick={() => handleSurpriseMe()}
-                  className="underline text-[11px]"
-                  disabled={isSurpriseLoading}
-                >
-                  Retry
-                </button>
-              </div>
-            ) : null}
-
-            {surprisePlan ? (
-              <div className="space-y-3">
-                <div>
-                  <p className="text-base font-semibold text-slate-50">
-                    {surprisePlan.title || 'Untitled plan'}
-                  </p>
-                  {surpriseOriginLabel ? (
-                    <p className="text-[11px] text-slate-400">{surpriseOriginLabel}</p>
-                  ) : null}
-                  {surpriseWhyText ? (
-                    <div className="mt-1 space-y-0.5">
-                      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                        Why this plan
-                      </p>
-                      <p className="text-[11px] text-slate-400">{surpriseWhyText}</p>
-                    </div>
-                  ) : null}
-                  {surprisePlan.intent ? (
-                    <p className="text-sm text-slate-300">{surprisePlan.intent}</p>
-                  ) : null}
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-500">Stops</p>
-                  <ul className="space-y-1">
-                    {surprisePlan.stops.map((stop) => (
-                      <li key={stop.id} className="text-sm text-slate-200">
-                         {stop.name}
-                        {stop.location ? (
-                          <span className="text-slate-400">  {stop.location}</span>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleSurpriseMe()}
-                    className={`${ctaClass('chip')} text-[11px]`}
-                    disabled={isSurpriseLoading}
-                  >
-                    Generate another
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleEditSurprisePlan}
-                    className={`${ctaClass('primary')} text-[11px]`}
-                    disabled={isSurpriseLoading}
-                  >
-                    Edit this plan
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      handleClearSurprisePreview();
-                      router.push('/');
-                    }}
-                    className="text-[11px] text-slate-300 hover:text-slate-100"
-                  >
-                    Exit
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </section>
-        ) : null}
-
         {/* Controls */}
         <section className="space-y-3">
           {/* What + Search */}
@@ -2292,7 +2091,7 @@ export default function HomePageClient() {
             </div>
           </div>
 
-          {/* Where + Mood + Surprise */}
+          {/* Where + Mood */}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="flex-1 flex flex-col gap-2">
               <label className="text-xs font-medium text-slate-300" htmlFor="home-where">
@@ -2350,19 +2149,6 @@ export default function HomePageClient() {
                   </option>
                 ))}
               </select>
-            </div>
-
-            <div className="flex flex-col gap-2 sm:w-40">
-              <span className="text-xs font-medium text-slate-300">
-                Feeling indecisive?
-              </span>
-              <button
-                type="button"
-                onClick={() => handleSurpriseMe()}
-                className="rounded-lg border border-violet-500/70 bg-violet-600/25 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-violet-100 hover:bg-violet-600/35"
-              >
-                Surprise me
-              </button>
             </div>
           </div>
 
@@ -2505,24 +2291,6 @@ export default function HomePageClient() {
                   isSaved,
                 });
 
-                const onPlanClick = () => {
-                  if (item.source === 'entity') {
-                    handlePlanClick(item.entity);
-                  } else {
-                    const synthetic: Entity = {
-                      id,
-                      name,
-                      description: description ?? '',
-                      mood,
-                      location: item.saved.location,
-                      cost,
-                      proximity,
-                      useCases,
-                    };
-                    handlePlanClick(synthetic);
-                  }
-                };
-
                 const onToggleFavorite = () => {
                   if (item.source === 'entity') {
                     toggleSavedWaypointForEntity(item.entity);
@@ -2608,13 +2376,6 @@ export default function HomePageClient() {
                           Explore
                         </Link>
                       ) : null}
-                      <button
-                        type="button"
-                        onClick={onPlanClick}
-                        className={`${ctaClass('primary')} text-[11px]`}
-                      >
-                        Resume
-                      </button>
                     </div>
                   </li>
                 );
@@ -2624,7 +2385,7 @@ export default function HomePageClient() {
                 <li className="rounded-xl border border-dashed border-slate-800 bg-slate-900/40 px-4 py-6 text-center text-xs text-slate-500">
                   {waypointView === 'saved'
                     ? 'No saved waypoints yet. Save a place from search to keep it handy.'
-                    : 'No matches yet. Try a new query, clear filters, or hit Surprise Me for a fresh idea.'}
+                    : 'No matches yet. Try a new query or clear filters to see new ideas.'}
                 </li>
               )}
             </ul>
