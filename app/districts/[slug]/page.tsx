@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation';
 import DistrictView from '@/app/surfaces/DistrictView';
-import { CITY_DISTRICTS, getCityById, getDistrictBySlug } from '../../data/cityDistricts';
+import { getCityById, getDistrictBySlug } from '../../data/cityDistricts';
 
 type PageProps = {
   params: Promise<{ slug: string }>;

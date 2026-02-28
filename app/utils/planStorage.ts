@@ -1,5 +1,14 @@
-import { deserializePlan, serializePlan, type Plan } from '../plan-engine';
+import {
+  deserializePlan,
+  serializePlan,
+  PLAN_VERSION,
+  type Plan,
+  type PlanSignals,
+  type Stop,
+} from '../plan-engine';
+import { buildReflectionSummary, type ReflectionSummary } from '../plan-engine/planReflection';
 import type { Origin } from '../plan-engine/origin';
+import { loadPlanById, type StoredPlan } from '@/lib/planStorage';
 
 export type PlanIndexItem = {
   id: string;
@@ -31,8 +40,30 @@ export type TemplateIndexItem = {
 const STORAGE_KEY = 'waypoint.v2.plansIndex';
 const SHARED_KEY = 'waypoint.v2.sharedIndex';
 const ORIGIN_KEY = 'waypoint.origin.active';
+const DRAFT_CLOUD_MAP_KEY = 'waypoint.v3.draftToCloudMap';
 const MAX_RECENT = 25;
 const originLogState = { loaded: false, saved: false };
+
+const DEFAULT_PLAN_SIGNALS: PlanSignals = {
+  chosen: false,
+  chosenAt: null,
+  completed: false,
+  completedAt: null,
+  skipped: false,
+  skippedAt: null,
+  revisitedCount: 0,
+  revisitedAt: [],
+  sentiment: null,
+  sentimentAt: undefined,
+  feedbackNotes: null,
+};
+
+function normalizePlanSignals(input?: PlanSignals | null): PlanSignals {
+  return {
+    ...DEFAULT_PLAN_SIGNALS,
+    ...(input ?? {}),
+  };
+}
 
 function hasLocalStorage(): boolean {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -88,6 +119,51 @@ function saveSharedSet(ids: Set<string>): void {
   }
 }
 
+function readDraftCloudMap(): Record<string, string> {
+  if (!hasLocalStorage()) return {};
+  try {
+    const raw = window.localStorage.getItem(DRAFT_CLOUD_MAP_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function saveDraftCloudMap(next: Record<string, string>): void {
+  if (!hasLocalStorage()) return;
+  try {
+    window.localStorage.setItem(DRAFT_CLOUD_MAP_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage failures
+  }
+}
+
+export function getCloudPlanIdForDraft(draftId: string): string | null {
+  if (!draftId) return null;
+  const map = readDraftCloudMap();
+  const match = map[draftId];
+  return typeof match === 'string' && match.trim() ? match : null;
+}
+
+export function setCloudPlanIdForDraft(draftId: string, cloudId: string): void {
+  if (!draftId || !cloudId) return;
+  const map = readDraftCloudMap();
+  if (map[draftId] === cloudId) return;
+  map[draftId] = cloudId;
+  saveDraftCloudMap(map);
+}
+
+export function clearCloudPlanIdForDraft(draftId: string): void {
+  if (!draftId) return;
+  const map = readDraftCloudMap();
+  if (!(draftId in map)) return;
+  delete map[draftId];
+  saveDraftCloudMap(map);
+}
+
 export function purgeInvalidOrLegacyPlans(items: PlanIndexItem[]): PlanIndexItem[] {
   const filtered: PlanIndexItem[] = [];
 
@@ -101,15 +177,16 @@ export function purgeInvalidOrLegacyPlans(items: PlanIndexItem[]): PlanIndexItem
       !originLogState.loaded
     ) {
       originLogState.loaded = true;
+      const planAny = plan as unknown as { origin?: unknown; meta?: { origin?: unknown } };
       console.log(
         '[originS] loaded plan JSON',
         JSON.stringify({
           id: plan?.id,
           title: plan?.title,
-            originTop: (plan as any)?.origin ?? null,
-            originMeta: (plan as any)?.meta?.origin ?? null,
-          })
-        );
+          originTop: planAny?.origin ?? null,
+          originMeta: planAny?.meta?.origin ?? null,
+        })
+      );
       }
       if (plan.version === '2.0') {
         filtered.push(item);
@@ -131,6 +208,46 @@ export function getPlansIndex(): PlanIndexItem[] {
   return purgeInvalidOrLegacyPlans(items);
 }
 
+function convertLegacyPlanToPlan(legacy: StoredPlan): Plan {
+  const stops: Stop[] = (legacy.stops ?? []).map((stop, index) => ({
+    id: stop.id ?? `${legacy.id}-stop-${index + 1}`,
+    name: stop.label || `Stop ${index + 1}`,
+    role: index === 0 ? 'anchor' : 'support',
+    optionality: 'required',
+    notes: stop.notes ?? undefined,
+    duration: stop.time ?? undefined,
+  }));
+
+  return {
+    id: legacy.id,
+    version: PLAN_VERSION,
+    title: legacy.title || 'Untitled plan',
+    intent: legacy.notes || '',
+    audience: legacy.attendees || '',
+    stops,
+    metadata: {
+      createdAt: legacy.createdAt,
+      lastUpdated: legacy.updatedAt,
+    },
+    planSignals: legacy.planSignals,
+  };
+}
+
+export function loadSavedPlan(planId: string): Plan | null {
+  if (!planId) return null;
+  const match = getPlansIndex().find((item) => item.id === planId);
+  if (match?.encoded) {
+    try {
+      return deserializePlan(match.encoded);
+    } catch {
+      // fall through to legacy
+    }
+  }
+  const legacy = loadPlanById(planId);
+  if (!legacy) return null;
+  return convertLegacyPlanToPlan(legacy);
+}
+
 export function upsertRecentPlan(plan: Plan): PlanIndexItem {
   const updatedAt = new Date().toISOString();
   if (
@@ -139,13 +256,14 @@ export function upsertRecentPlan(plan: Plan): PlanIndexItem {
     !originLogState.saved
   ) {
     originLogState.saved = true;
+    const planAny = plan as unknown as { origin?: unknown; meta?: { origin?: unknown } };
     console.log(
       '[originS] saving plan JSON',
       JSON.stringify({
         id: plan.id,
         title: plan.title,
-        originTop: (plan as any)?.origin ?? null,
-        originMeta: (plan as any)?.meta?.origin ?? null,
+        originTop: planAny?.origin ?? null,
+        originMeta: planAny?.meta?.origin ?? null,
       })
     );
   }
@@ -182,6 +300,25 @@ export function upsertRecentPlan(plan: Plan): PlanIndexItem {
   return nextItem;
 }
 
+export function updatePlanSentiment(
+  planId: string,
+  sentiment: PlanSignals['sentiment']
+): Plan | null {
+  const plan = loadSavedPlan(planId);
+  if (!plan) return null;
+  const sentimentAt = sentiment ? new Date().toISOString() : undefined;
+  const nextPlan: Plan = {
+    ...plan,
+    planSignals: {
+      ...normalizePlanSignals(plan.planSignals),
+      sentiment,
+      sentimentAt,
+    },
+  };
+  upsertRecentPlan(nextPlan);
+  return nextPlan;
+}
+
 export function toggleSavedById(id: string): boolean {
   const items = readIndex();
   const idx = items.findIndex((item) => item.id === id);
@@ -207,6 +344,25 @@ export function getRecentPlans(): PlanIndexItem[] {
 
 export function getSavedPlans(): PlanIndexItem[] {
   return sortByUpdated(getPlansIndex().filter((item) => item.isSaved));
+}
+
+export function getSavedPlansForReflection(): Plan[] {
+  return getSavedPlans()
+    .map((item) => {
+      try {
+        return deserializePlan(item.encoded);
+      } catch {
+        return null;
+      }
+    })
+    .filter((plan): plan is Plan => Boolean(plan?.id));
+}
+
+export function getReflectionSummary(opts?: {
+  includeRecentlyTouched?: boolean;
+}): ReflectionSummary {
+  const plans = getSavedPlansForReflection();
+  return buildReflectionSummary(plans, opts);
 }
 
 export function getTemplatePlans(): TemplateIndexItem[] {

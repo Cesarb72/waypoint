@@ -1,1 +1,1 @@
-export const CLOUD_PLANS_TABLE: 'waypoints' | 'plans' = 'waypoints';
+export const CLOUD_PLANS_TABLE = 'plans' as const;

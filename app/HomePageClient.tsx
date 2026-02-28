@@ -12,8 +12,6 @@ import type {
 } from '@/data/entities';
 import { fetchEntities } from '@/lib/entitySource';
 import { searchEntities } from '@/lib/searchEntities';
-import type { StoredPlan } from '@/lib/planStorage';
-import { loadPlans, deletePlan, clearPlans } from '@/lib/planStorage';
 import {
   loadDiscoverySession,
   saveDiscoverySession,
@@ -37,6 +35,7 @@ import {
   type Stop,
   v6Starters,
 } from './plan-engine';
+import type { Template } from '@/types/templates';
 import type { PlanStarter } from './plan-engine';
 import {
   generateSurpriseStarterCandidate,
@@ -47,8 +46,9 @@ import {
   getRecentPlans,
   getSavedPlans,
   getTemplatePlans,
+  loadSavedPlan,
   removePlanById,
-  markPlanShared,
+  upsertRecentPlan,
   type PlanIndexItem,
   type TemplateIndexItem,
   isPlanShared,
@@ -60,6 +60,17 @@ import { getSupabaseBrowserClient } from './lib/supabaseBrowserClient';
 import { fetchCloudPlan, listCloudPlans } from './lib/cloudPlans';
 import { CLOUD_PLANS_TABLE } from './lib/cloudTables';
 import { withPreservedModeParam } from './lib/entryMode';
+import {
+  WAYPOINT_TEMPLATES,
+  type WaypointTemplate,
+  DISCOVERY_PRESETS,
+} from '@/lib/templates';
+import {
+  VENUE_EXPERIENCES_V2,
+  type VenueExperienceV2,
+} from '@/lib/venueExperiencesV2';
+import { getTemplateSeedById, validateTemplateSeed } from '@/lib/templateSeeds';
+import { getTemplateStopDisplayLabel } from '@/lib/templatePlan';
 
 const MOOD_OPTIONS: (Mood | 'all')[] = [
   'all',
@@ -96,7 +107,58 @@ const DEMO_PLAN: Plan = {
   ],
 };
 
+type PlacePreview = {
+  displayName: string;
+  locationHint?: string;
+  cost?: CostTag;
+};
+
+type PreviewQuery = {
+  key: string;
+  query: string;
+  fallback: string;
+};
+
+const PLACE_PREVIEW_CACHE = new Map<string, PlacePreview | null>();
+const PLACE_PREVIEW_INFLIGHT = new Map<string, Promise<PlacePreview | null>>();
+const PLACE_PREVIEW_MAX_CONCURRENCY = 6;
+
 let didLogSavedWaypoint = false;
+const LAST_SEARCH_STORAGE_KEY = 'waypoint.lastSearch';
+const ACTIVE_PLAN_STORAGE_KEY = 'waypoint.activePlanId';
+const RECENT_PLANS_PULSE_KEY = 'waypoint.recentPlansPulse';
+const RECENT_PLANS_PULSE_EVENT = 'waypoint:recentPlansPulse';
+
+function mergePlanLists(
+  base: PlanIndexItem[],
+  supa: PlanIndexItem[]
+): PlanIndexItem[] {
+  const merged = new Map<string, PlanIndexItem>();
+
+  const upsert = (item: PlanIndexItem) => {
+    const existing = merged.get(item.id);
+    if (!existing) {
+      merged.set(item.id, item);
+      return;
+    }
+    const existingTime = new Date(existing.updatedAt).getTime();
+    const incomingTime = new Date(item.updatedAt).getTime();
+    const useIncoming = incomingTime > existingTime;
+    merged.set(item.id, {
+      ...(useIncoming ? item : existing),
+      isSaved: Boolean(existing.isSaved || item.isSaved),
+      isShared: existing.isShared || item.isShared,
+      updatedAt: useIncoming ? item.updatedAt : existing.updatedAt,
+    });
+  };
+
+  base.forEach(upsert);
+  supa.forEach(upsert);
+
+  return [...merged.values()].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  );
+}
 
 // Helpers to pretty-print tags on the chips
 function labelCost(cost: CostTag): string {
@@ -130,62 +192,449 @@ function labelUseCase(u: UseCaseTag): string {
   }
 }
 
+function extractImageUrl(source: unknown): string | null {
+  if (!source || typeof source !== 'object') return null;
+  const obj = source as Record<string, unknown>;
+
+  const readString = (value: unknown) =>
+    typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+
+  const direct = readString(obj.imageUrl) ?? readString(obj.photoUrl);
+  if (direct) return direct;
+
+  const image = obj.image;
+  if (typeof image === 'string') {
+    const candidate = readString(image);
+    if (candidate) return candidate;
+  } else if (image && typeof image === 'object') {
+    const imageObj = image as Record<string, unknown>;
+    const candidate = readString(imageObj.url) ?? readString(imageObj.src);
+    if (candidate) return candidate;
+  }
+
+  const photos = Array.isArray(obj.photos) ? obj.photos : null;
+  if (photos && photos.length > 0) {
+    const first = photos[0];
+    if (typeof first === 'string') {
+      const candidate = readString(first);
+      if (candidate) return candidate;
+    } else if (first && typeof first === 'object') {
+      const firstObj = first as Record<string, unknown>;
+      const candidate = readString(firstObj.url) ?? readString(firstObj.src);
+      if (candidate) return candidate;
+    }
+  }
+
+  const media = Array.isArray(obj.media) ? obj.media : null;
+  if (media && media.length > 0) {
+    const first = media[0];
+    if (first && typeof first === 'object') {
+      const firstObj = first as Record<string, unknown>;
+      const candidate = readString(firstObj.url) ?? readString(firstObj.src);
+      if (candidate) return candidate;
+    }
+  }
+
+  const savedWaypoint = obj.savedWaypoint;
+  if (savedWaypoint && typeof savedWaypoint === 'object') {
+    const savedObj = savedWaypoint as Record<string, unknown>;
+    const candidate =
+      readString(savedObj.imageUrl) ?? readString(savedObj.photoUrl);
+    if (candidate) return candidate;
+  }
+
+  return null;
+}
+
+function extractWebsiteUrl(input: unknown): string | undefined {
+  if (!input) return undefined;
+  const obj = input as Record<string, unknown>;
+
+  const readString = (value: unknown) =>
+    typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+
+  const normalize = (value: string | null): string | undefined => {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.startsWith('mailto:') || trimmed.startsWith('tel:')) return undefined;
+    if (trimmed.startsWith('/')) return undefined;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+    if (trimmed.includes(' ') || /\s/.test(trimmed)) return undefined;
+    if (trimmed.includes('.')) {
+      return `https://${trimmed}`;
+    }
+    return undefined;
+  };
+
+  const direct =
+    readString(obj.websiteUrl) ??
+    readString(obj.website) ??
+    readString(obj.url) ??
+    readString(obj.link);
+  const normalizedDirect = normalize(direct);
+  if (normalizedDirect) return normalizedDirect;
+
+  const entity = obj.entity;
+  if (entity && typeof entity === 'object') {
+    const entityObj = entity as Record<string, unknown>;
+    const entityValue =
+      readString(entityObj.websiteUrl) ??
+      readString(entityObj.website) ??
+      readString(entityObj.url) ??
+      readString(entityObj.link);
+    const normalizedEntity = normalize(entityValue);
+    if (normalizedEntity) return normalizedEntity;
+  }
+
+  const savedWaypoint = obj.savedWaypoint;
+  if (savedWaypoint && typeof savedWaypoint === 'object') {
+    const savedObj = savedWaypoint as Record<string, unknown>;
+    const savedValue =
+      readString(savedObj.websiteUrl) ??
+      readString(savedObj.website) ??
+      readString(savedObj.url);
+    const normalizedSaved = normalize(savedValue);
+    if (normalizedSaved) return normalizedSaved;
+  }
+
+  return undefined;
+}
+
+function buildPreviewKey(query: string, coords: Coords | null): string {
+  const normalizedQuery = query.trim().toLowerCase();
+  const locationKey = coords
+    ? `${coords.lat.toFixed(2)},${coords.lng.toFixed(2)}`
+    : 'none';
+  return `${normalizedQuery}|${locationKey}`;
+}
+
+function shortenLocationHint(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const first = trimmed.split(',')[0]?.trim();
+  return first || trimmed;
+}
+
+async function fetchPlacePreview(
+  query: string,
+  coords: Coords | null
+): Promise<PlacePreview | null> {
+  const params = new URLSearchParams({ q: query });
+  if (coords) {
+    params.set('lat', String(coords.lat));
+    params.set('lng', String(coords.lng));
+    params.set('radius', '8000');
+  }
+  try {
+    const res = await fetch(`/api/places/search?${params.toString()}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { ok?: boolean; results?: Entity[] };
+    if (!data?.ok || !Array.isArray(data.results) || data.results.length === 0) {
+      return null;
+    }
+    const top = data.results[0];
+    if (!top?.name) return null;
+    return {
+      displayName: top.name,
+      locationHint: shortenLocationHint(top.location),
+      cost: top.cost,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolvePlacePreview(
+  query: PreviewQuery,
+  coords: Coords | null
+): Promise<PlacePreview | null> {
+  if (PLACE_PREVIEW_CACHE.has(query.key)) {
+    return PLACE_PREVIEW_CACHE.get(query.key) ?? null;
+  }
+  const inflight = PLACE_PREVIEW_INFLIGHT.get(query.key);
+  if (inflight) return inflight;
+  const promise = fetchPlacePreview(query.query, coords)
+    .then((result) => {
+      PLACE_PREVIEW_CACHE.set(query.key, result ?? null);
+      PLACE_PREVIEW_INFLIGHT.delete(query.key);
+      return result ?? null;
+    })
+    .catch(() => {
+      PLACE_PREVIEW_CACHE.set(query.key, null);
+      PLACE_PREVIEW_INFLIGHT.delete(query.key);
+      return null;
+    });
+  PLACE_PREVIEW_INFLIGHT.set(query.key, promise);
+  return promise;
+}
+
+function buildSeededTemplatePreviewQueries(
+  template: Template,
+  coords: Coords | null
+): PreviewQuery[] {
+  const stops = template.stops.length > 0 ? template.stops : [];
+  return stops.slice(0, 3).map((stop) => {
+    const fallback = stop.label?.trim() || template.title;
+    const query = stop.placeRef?.query?.trim() || fallback;
+    return {
+      key: buildPreviewKey(query, coords),
+      query,
+      fallback,
+    };
+  });
+}
+
+function buildExperiencePreviewQueries(
+  experience: VenueExperienceV2,
+  coords: Coords | null
+): PreviewQuery[] {
+  const stops =
+    experience.seededStops && experience.seededStops.length > 0
+      ? experience.seededStops
+      : [experience.defaultQuery];
+  const suffix = experience.locationHint ? ` ${experience.locationHint}` : '';
+  return stops.slice(0, 3).map((stop) => {
+    const fallback = stop?.trim() || experience.title;
+    const query = `${fallback}${suffix}`.trim();
+    return {
+      key: buildPreviewKey(query, coords),
+      query,
+      fallback,
+    };
+  });
+}
+
+function buildPackPreviewQueries(
+  template: WaypointTemplate,
+  coords: Coords | null
+): PreviewQuery[] {
+  const hints =
+    Array.isArray(template.intentQueryHints) && template.intentQueryHints.length > 0
+      ? template.intentQueryHints
+      : [template.name];
+  return hints.slice(0, 3).map((hint) => {
+    const fallback = hint?.trim() || template.name;
+    const query = fallback;
+    return {
+      key: buildPreviewKey(query, coords),
+      query,
+      fallback,
+    };
+  });
+}
+
+function getPreviewDisplay(
+  queries: PreviewQuery[]
+): { label: string; title?: string }[] {
+  const seen = new Set<string>();
+  const items: { label: string; title?: string }[] = [];
+  queries.forEach((query) => {
+    const cached = PLACE_PREVIEW_CACHE.get(query.key);
+    const label = cached?.displayName ?? query.fallback;
+    const normalized = label.toLowerCase();
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    const titleParts = [
+      cached?.locationHint?.trim() || undefined,
+      cached?.cost ? `Price: ${labelCost(cached.cost)}` : undefined,
+    ].filter(Boolean) as string[];
+    items.push({
+      label,
+      title: titleParts.length > 0 ? titleParts.join(' · ') : undefined,
+    });
+  });
+  return items.slice(0, 3);
+}
+
+function buildResolvedStopNameMap(
+  template: Template,
+  coords: Coords | null
+): Record<string, string> {
+  const previewItems = getPreviewDisplay(
+    buildSeededTemplatePreviewQueries(template, coords)
+  );
+  const resolved: Record<string, string> = {};
+  template.stops.slice(0, previewItems.length).forEach((stop, index) => {
+    const label = previewItems[index]?.label;
+    if (label) {
+      resolved[stop.id] = label;
+    }
+  });
+  return resolved;
+}
+
+function looksLikeAddress(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const streetPattern =
+    /\b\d{1,5}\s+\w+.*\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|way|pkwy|parkway)\b/i;
+  const cityStateZipPattern = /\b[A-Z][a-z]+,\s*[A-Z]{2}\s*\d{5}\b/;
+  const hasZipLike = /\b\d{5}\b/.test(trimmed);
+  const hasComma = trimmed.includes(',');
+  const hasAddressTokens = /\b(suite|ste|unit|fl|floor|ca|usa)\b/i.test(trimmed);
+  const hasDigits = /\d/.test(trimmed);
+  return (
+    streetPattern.test(trimmed) ||
+    cityStateZipPattern.test(trimmed) ||
+    (hasDigits && hasComma && (hasZipLike || hasAddressTokens)) ||
+    (hasDigits && hasAddressTokens)
+  );
+}
+
+function getResultBlurb(
+  item: unknown
+): { primary: string; secondary?: string; tags?: string[] } {
+  const obj = (item ?? {}) as Record<string, unknown>;
+  const rawDescription =
+    typeof obj.description === 'string' ? obj.description : undefined;
+  const rawLocation =
+    typeof obj.locationLine === 'string'
+      ? obj.locationLine
+      : typeof obj.location === 'string'
+      ? obj.location
+      : undefined;
+
+  const normalizeText = (value: string): string => {
+    const collapsed = value.replace(/\s+/g, ' ').replace(/\n+/g, ' ').trim();
+    if (!collapsed) return '';
+    const limit = 140;
+    if (collapsed.length <= limit) return collapsed;
+    const trimmed = collapsed.slice(0, limit).replace(/[.,;:!?]?\s*$/, '');
+    return `${trimmed}…`;
+  };
+
+  const normalizeForCompare = (value: string): string =>
+    value
+      .toLowerCase()
+      .replace(/[.,;:!?]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const isDuplicateOfLocation = (desc: string, loc: string): boolean => {
+    if (!desc || !loc) return false;
+    const normDesc = normalizeForCompare(desc);
+    const normLoc = normalizeForCompare(loc);
+    if (!normDesc || !normLoc) return false;
+    if (normDesc.includes(normLoc)) return true;
+    if (normLoc.includes(normDesc)) return true;
+    const descTokens = new Set(normDesc.split(' ').filter(Boolean));
+    const locTokens = new Set(normLoc.split(' ').filter(Boolean));
+    if (locTokens.size === 0) return false;
+    let overlap = 0;
+    locTokens.forEach((token) => {
+      if (descTokens.has(token)) overlap += 1;
+    });
+    return overlap / locTokens.size >= 0.7;
+  };
+
+  const toTypeLabel = (value: string | null): string | null => {
+    if (!value) return null;
+    const normalized = value
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    if (!normalized) return null;
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  };
+
+  const descriptionCandidate = rawDescription ? normalizeText(rawDescription) : '';
+  const locationLine = rawLocation ? rawLocation.trim() : '';
+  const description =
+    descriptionCandidate &&
+    !looksLikeAddress(descriptionCandidate) &&
+    !(locationLine && isDuplicateOfLocation(descriptionCandidate, locationLine))
+      ? descriptionCandidate
+      : '';
+
+  const typeCandidates = [
+    obj.category,
+    obj.kind,
+    obj.type,
+    Array.isArray(obj.types) ? obj.types[0] : null,
+    (obj.entity as Record<string, unknown> | undefined)?.category,
+    (obj.entity as Record<string, unknown> | undefined)?.kind,
+    (obj.entity as Record<string, unknown> | undefined)?.type,
+    Array.isArray((obj.entity as Record<string, unknown> | undefined)?.types)
+      ? ((obj.entity as Record<string, unknown>).types as unknown[])?.[0]
+      : null,
+    (obj.savedWaypoint as Record<string, unknown> | undefined)?.type,
+  ]
+    .map((candidate) =>
+      typeof candidate === 'string' && candidate.trim().length > 0
+        ? candidate.trim()
+        : null
+    )
+    .filter(Boolean) as string[];
+
+  const typeLabel = toTypeLabel(typeCandidates[0] ?? null);
+  const priceValue =
+    typeof obj.priceLevel === 'string' && obj.priceLevel.trim()
+      ? obj.priceLevel.trim()
+      : typeof obj.cost === 'string' && obj.cost.trim()
+      ? obj.cost.trim()
+      : null;
+
+  const tags: string[] = [];
+  if (obj.outdoor === true || obj.isOutdoor === true) tags.push('Outdoor');
+  if (obj.indoor === true || obj.isIndoor === true) tags.push('Indoor');
+  if (obj.familyFriendly === true || obj.isFamilyFriendly === true) {
+    tags.push('Family-friendly');
+  }
+  if (typeof obj.priceLevel === 'string' && obj.priceLevel.trim()) {
+    tags.push(obj.priceLevel.trim());
+  }
+
+  if (description) {
+    return {
+      primary: description,
+      secondary: priceValue ? `Price: ${priceValue}` : undefined,
+      tags: tags.length > 0 ? tags.slice(0, 3) : undefined,
+    };
+  }
+
+  if (typeLabel) {
+    return {
+      primary: `A ${typeLabel.toLowerCase()} to consider for your plan.`,
+      secondary: priceValue ? `Price: ${priceValue}` : 'Good candidate for a stop.',
+      tags: tags.length > 0 ? tags.slice(0, 3) : undefined,
+    };
+  }
+
+  return {
+    primary: 'A place to consider for your plan.',
+    secondary: priceValue ? `Price: ${priceValue}` : undefined,
+    tags: tags.length > 0 ? tags.slice(0, 3) : undefined,
+  };
+}
+
 function buildReturnTo(pathname: string, searchParams: URLSearchParams): string {
   const qs = searchParams.toString();
   return `${pathname}${qs ? `?${qs}` : ''}`;
 }
 
-function formatMoodLabel(mood: Mood): string {
-  return mood.charAt(0).toUpperCase() + mood.slice(1);
+function sanitizeReturnTo(raw?: string | null): string | null {
+  if (!raw) return null;
+  try {
+    if (!raw.startsWith('/')) return null;
+    const url = new URL(raw, 'http://example.com');
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return null;
+  }
 }
 
-function buildDiscoverySignal(options: {
-  query: string;
-  moodFilter: Mood | 'all';
-  name: string;
-  description?: string;
-  location?: string;
-  tags?: string[];
-  entityMood?: Mood;
-  isSaved: boolean;
-}): string | null {
-  const trimmedQuery = options.query.trim();
-  const queryLower = trimmedQuery.toLowerCase();
-  const haystack = [
-    options.name,
-    options.description,
-    options.location,
-    options.tags?.join(' '),
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-
-  if (trimmedQuery && haystack) {
-    const queryWords = queryLower
-      .split(/\s+/)
-      .map((word) => word.trim())
-      .filter((word) => word.length >= 3);
-    const matchesQuery =
-      haystack.includes(queryLower) || queryWords.some((word) => haystack.includes(word));
-    if (matchesQuery) {
-      return `Matches your search: "${trimmedQuery}"`;
-    }
-  }
-
-  if (options.moodFilter !== 'all' && options.entityMood === options.moodFilter) {
-    return `Matches mood: ${formatMoodLabel(options.moodFilter)}`;
-  }
-
-  if (options.isSaved) {
-    return 'Matches saved interest';
-  }
-
-  if (options.moodFilter !== 'all') {
-    return 'Fits your filters';
-  }
-
-  return null;
+function normalizeLabel(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[().,:;\\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export default function HomePageClient() {
@@ -193,7 +642,7 @@ export default function HomePageClient() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const showDevTools = process.env.NEXT_PUBLIC_SHOW_DEV_TOOLS === '1';
-  const SHARE_ENABLED = false;
+  void showDevTools;
   const TEMPLATES_ENABLED = false;
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const { user } = useSession();
@@ -210,12 +659,23 @@ export default function HomePageClient() {
     'idle' | 'requesting' | 'denied' | 'available'
   >('idle');
 
-  //  Recently created plans (from localStorage)
-  const [recentPlans, setRecentPlans] = useState<StoredPlan[]>([]);
-
   //  Saved waypoints (favorites)
   const [savedWaypoints, setSavedWaypoints] = useState<SavedWaypoint[]>([]);
   const [waypointView, setWaypointView] = useState<'all' | 'saved'>('all');
+  const [selectedDiscoveryItem, setSelectedDiscoveryItem] =
+    useState<DisplayWaypoint | null>(null);
+  const [addToPlanError, setAddToPlanError] = useState<string | null>(null);
+  const [addToPlanSuccess, setAddToPlanSuccess] = useState<string | null>(null);
+  const [isAddingToPlan, setIsAddingToPlan] = useState(false);
+  const [slotHint, setSlotHint] = useState<string | null>(null);
+  const [resultsUpdatedAt, setResultsUpdatedAt] = useState<string | null>(null);
+  const [resultsCleared, setResultsCleared] = useState(false);
+  const [lastResultsSource, setLastResultsSource] = useState<
+    'search' | 'surprise' | null
+  >(null);
+  const [continueCollapsed, setContinueCollapsed] = useState(false);
+  const userToggledContinueRef = useRef(false);
+  const [activePlanId, setActivePlanId] = useState<string | null>(null);
   /**
    * SavedWaypoint fields observed from local storage (lib/savedWaypoints.ts):
    * id, name, description, location, mood, cost, proximity, useCases.
@@ -223,7 +683,7 @@ export default function HomePageClient() {
    */
   //  V2 plans stored via plan engine (recent/saved)
   const [recentV2Plans, setRecentV2Plans] = useState<PlanIndexItem[]>([]);
-  const [recentShowSavedOnly, setRecentShowSavedOnly] = useState(false);
+  const [recentShowSavedOnly] = useState(false);
   const [templatePlans, setTemplatePlans] = useState<TemplateIndexItem[]>([]);
   const [templateLoading, setTemplateLoading] = useState(false);
   const [showTemplateExplorer, setShowTemplateExplorer] = useState(false);
@@ -238,9 +698,29 @@ export default function HomePageClient() {
   const discoverySnapshotRef = useRef<{ path: string; queryString: string } | null>(null);
   const discoveryScrollRestoredRef = useRef(false);
   const discoveryActiveRef = useRef(false);
+  const lastSearchHydratedRef = useRef(false);
+  const [showExploreMore, setShowExploreMore] = useState(false);
+  const [previewTick, setPreviewTick] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
+  const [removeCandidateId, setRemoveCandidateId] = useState<string | null>(null);
+  void previewTick;
+  const planIdParam = (searchParams.get('planId') ?? '').trim() || null;
+  const currentPlanId = activePlanId || planIdParam;
+  const railPlanId = currentPlanId;
+  const railShortId = railPlanId ? railPlanId.slice(0, 6) : '';
+  const slotPrefillRef = useRef(false);
   const templateSectionRef = useRef<HTMLDivElement | null>(null);
+  const exploreSectionRef = useRef<HTMLDivElement | null>(null);
   const templatesBootstrappedRef = useRef(false);
+  const [openPreviewId, setOpenPreviewId] = useState<string | null>(null);
   const didLogDerivedOriginRef = useRef(false);
+  const addToPlanTimeoutRef = useRef<number | null>(null);
+  const addToPlanInFlightRef = useRef(false);
+  const addToPlanTickRef = useRef(0);
+  const addToPlanTickScheduledRef = useRef(false);
+  const addToPlanDedupeRef = useRef<Set<string>>(new Set());
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  const lastCompletedSearchRef = useRef<string | null>(null);
 
   function requestLocation() {
     if (typeof window === 'undefined' || !('geolocation' in navigator)) {
@@ -262,12 +742,6 @@ export default function HomePageClient() {
       }
     );
   }
-
-  // Load recent plans once on mount
-  useEffect(() => {
-    const plans = loadPlans();
-    setRecentPlans(plans);
-  }, []);
 
   // Load saved waypoints once on mount
   useEffect(() => {
@@ -305,6 +779,15 @@ export default function HomePageClient() {
   }, [savedWaypoints, waypointView]);
 
   useEffect(() => {
+    return () => {
+      if (addToPlanTimeoutRef.current) {
+        window.clearTimeout(addToPlanTimeoutRef.current);
+        addToPlanTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!userId) {
       pendingStarterHandledRef.current = false;
       isPromotingRef.current = false;
@@ -317,11 +800,16 @@ export default function HomePageClient() {
     const listResult = await listCloudPlans(userId);
     if (!listResult.ok) {
       setSupabaseLoading(false);
-      const fallback = getRecentPlans().map((item) => ({
+      const fallback = (recentShowSavedOnly ? getSavedPlans() : getRecentPlans()).map(
+        (item) => ({
         ...item,
         isShared: isPlanShared(item.id),
-      }));
-      setRecentV2Plans(fallback.slice(0, 8));
+        })
+      );
+      const filtered = recentShowSavedOnly
+        ? fallback.filter((item) => item.isSaved)
+        : fallback;
+      setRecentV2Plans(filtered.slice(0, 8));
       return;
     }
 
@@ -348,9 +836,51 @@ export default function HomePageClient() {
     );
 
     const mapped = cloudRows.filter(Boolean) as PlanIndexItem[];
-    setRecentV2Plans(mapped.slice(0, 8));
+    const base = (recentShowSavedOnly ? getSavedPlans() : getRecentPlans()).map(
+      (item) => ({
+        ...item,
+        isShared: isPlanShared(item.id),
+      })
+    );
+    const merged = mergePlanLists(base, mapped);
+    const filtered = recentShowSavedOnly
+      ? merged.filter((item) => item.isSaved)
+      : merged;
+    setRecentV2Plans(filtered.slice(0, 8));
     setSupabaseLoading(false);
-  }, [userId]);
+  }, [recentShowSavedOnly, userId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const refreshLocalPlans = () => {
+      const plans = (recentShowSavedOnly ? getSavedPlans() : getRecentPlans()).map(
+        (item) => ({
+          ...item,
+          isShared: isPlanShared(item.id),
+        })
+      );
+      setRecentV2Plans(plans.slice(0, 8));
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== RECENT_PLANS_PULSE_KEY) return;
+      refreshLocalPlans();
+      if (userId) {
+        void loadSupabaseWaypoints();
+      }
+    };
+    const handlePulse = () => {
+      refreshLocalPlans();
+      if (userId) {
+        void loadSupabaseWaypoints();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener(RECENT_PLANS_PULSE_EVENT, handlePulse);
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener(RECENT_PLANS_PULSE_EVENT, handlePulse);
+    };
+  }, [loadSupabaseWaypoints, recentShowSavedOnly, userId]);
 
   const loadTemplates = useCallback(async () => {
     const localTemplates = getTemplatePlans();
@@ -498,6 +1028,9 @@ export default function HomePageClient() {
   const curateModeHref = useMemo(() => {
     return buildModeHref('curate', selectedTemplateFromPayload || demoFromPayload);
   }, [buildModeHref, demoFromPayload, selectedTemplateFromPayload]);
+  void planModeHref;
+  void publishModeHref;
+  void curateModeHref;
   const cityDistrictsHref = useMemo(
     () => withPreservedModeParam('/city/san-jose', searchParams),
     [searchParams]
@@ -521,6 +1054,12 @@ export default function HomePageClient() {
 
     (async () => {
       setSupabaseLoading(true);
+      type CloudPlanInsert = {
+        id: string;
+        owner_id: string;
+        plan_json: Plan;
+        share_token?: string | null;
+      };
       const payload = localPlans
         .map((item) => {
           try {
@@ -528,18 +1067,17 @@ export default function HomePageClient() {
             return {
               id: item.id,
               owner_id: userId,
-              title: item.title || planObj.title || 'Waypoint',
-              plan: planObj,
-              parent_id: null,
-            };
+              plan_json: planObj,
+              share_token: planObj.presentation?.shareToken ?? null,
+            } as CloudPlanInsert;
           } catch {
             return null;
           }
         })
-        .filter(Boolean);
+        .filter((item): item is CloudPlanInsert => Boolean(item));
 
       try {
-        await supabase.from(CLOUD_PLANS_TABLE).upsert(payload as any, { onConflict: 'id' });
+        await supabase.from(CLOUD_PLANS_TABLE).upsert(payload, { onConflict: 'id' });
         window.localStorage.setItem(flag, '1');
         if (payload.length > 0) {
           setMigrationMessage(
@@ -641,6 +1179,16 @@ export default function HomePageClient() {
     () => buildReturnTo(pathname || '/', searchParams),
     [pathname, searchParams]
   );
+  const authReturnTo = useMemo(
+    () => sanitizeReturnTo(searchParams.get('returnTo')),
+    [searchParams]
+  );
+
+  useEffect(() => {
+    if (!userId) return;
+    if (!authReturnTo) return;
+    router.replace(authReturnTo);
+  }, [authReturnTo, router, userId]);
 
   const moodFromUrlRaw =
     (searchParams.get('mood') as Mood | 'all' | null) ?? 'all';
@@ -658,6 +1206,48 @@ export default function HomePageClient() {
   useEffect(() => {
     setWhatInput(queryFromUrl);
   }, [queryFromUrl]);
+
+  useEffect(() => {
+    if (slotPrefillRef.current) return;
+    slotPrefillRef.current = true;
+    const slotParam = searchParams.get('slot');
+    const queryParam = searchParams.get('q');
+    if (slotParam) {
+      setSlotHint(slotParam);
+    }
+    if (queryParam) {
+      setWhatInput(queryParam);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (lastSearchHydratedRef.current) return;
+    if (whatInput.trim() || whereInput.trim()) return;
+    const raw = window.localStorage.getItem(LAST_SEARCH_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as {
+        q?: string;
+        where?: string;
+        mood?: Mood | 'all';
+      };
+      if (typeof parsed.q === 'string' && parsed.q.trim()) {
+        setWhatInput(parsed.q.trim());
+      }
+      if (typeof parsed.where === 'string' && parsed.where.trim()) {
+        setWhereInput(parsed.where.trim());
+      }
+      if (parsed.mood && MOOD_OPTIONS.includes(parsed.mood)) {
+        if (parsed.mood !== moodFromUrl) {
+          updateSearchParams({ mood: parsed.mood });
+        }
+      }
+    } catch {
+      // ignore malformed stored state
+    }
+    lastSearchHydratedRef.current = true;
+  }, [moodFromUrl, updateSearchParams, whatInput, whereInput]);
 
   useEffect(() => {
     discoverySnapshotRef.current = {
@@ -735,6 +1325,7 @@ export default function HomePageClient() {
     };
   }, []);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- updateSearchParams is intentionally not memoized
   function updateSearchParams(next: { q?: string; mood?: Mood | 'all' }) {
     const params = new URLSearchParams(searchParams.toString());
 
@@ -756,6 +1347,8 @@ export default function HomePageClient() {
     }
 
     const queryString = params.toString();
+    const currentQueryString = searchParams.toString();
+    if (queryString === currentQueryString) return;
     router.replace(queryString ? `${pathname}?${queryString}` : pathname, {
       scroll: false,
     });
@@ -773,6 +1366,14 @@ export default function HomePageClient() {
 
   function triggerSearch() {
     const combined = buildCombinedQuery();
+    if (typeof window !== 'undefined') {
+      const payload = {
+        q: whatInput.trim(),
+        where: whereInput.trim(),
+        mood: moodFromUrl,
+      };
+      window.localStorage.setItem(LAST_SEARCH_STORAGE_KEY, JSON.stringify(payload));
+    }
     updateSearchParams({ q: combined });
   }
 
@@ -794,9 +1395,9 @@ export default function HomePageClient() {
           setData(result);
           setError(null);
         }
-      } catch (err) {
+      } catch {
         if (!cancelled) {
-          setError('Failed to load waypoints.');
+          setError('Failed to load ideas.');
         }
       } finally {
         if (!cancelled) {
@@ -902,8 +1503,9 @@ export default function HomePageClient() {
 
     const encoded = serializePlan(nextPlan);
     const params = new URLSearchParams();
-    params.set('from', encoded);
+    params.set('fromEncoded', encoded);
     params.set('originSource', 'home_search');
+    params.set('from', 'home_search_results');
     const href = `/create?${params.toString()}`;
     router.push(withPreservedModeParam(href, searchParams));
   }
@@ -912,10 +1514,19 @@ export default function HomePageClient() {
   function handlePlanClick(entity: Entity) {
     goToPlanForEntity(entity);
   }
+  void handlePlanClick;
+
+  function pushCreateWithParams(params: URLSearchParams) {
+    const qs = params.toString();
+    const href = `/create${qs ? `?${qs}` : ''}`;
+    router.push(withPreservedModeParam(href, searchParams));
+  }
 
   //  Surprise Me: pick a random entity and jump straight into planning
   function handleSurpriseMe(mode?: SurpriseGeneratorMode) {
     setSurpriseError(null);
+    setSurpriseSaveError(null);
+    setIsSavingSurprisePlan(false);
     setIsSurpriseLoading(true);
     const nextNonce = surpriseNonce + 1;
     setSurpriseNonce(nextNonce);
@@ -935,15 +1546,46 @@ export default function HomePageClient() {
       setSurpriseMeta(meta);
       const seededPlan = createPlanFromTemplate(starter.seedPlan);
       const metadata = seededPlan.metadata ?? {};
+      const pool = filteredEntities.length > 0 ? filteredEntities : data;
+      const nextStops = [...(seededPlan.stops ?? [])].slice(0, 4);
+      if (nextStops.length < 2 && pool.length > 0) {
+        const usedNames = new Set(nextStops.map((stop) => stop.name));
+        const targetCount = Math.min(4, Math.max(2, nextStops.length));
+        const seedIndex = seed % pool.length;
+        for (let offset = 0; nextStops.length < targetCount && offset < pool.length; offset += 1) {
+          const entity = pool[(seedIndex + offset) % pool.length];
+          if (!entity || usedNames.has(entity.name)) continue;
+          usedNames.add(entity.name);
+          nextStops.push({
+            id:
+              typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                ? crypto.randomUUID()
+                : `stop_${Math.random().toString(36).slice(2, 8)}`,
+            name: entity.name ?? 'New stop',
+            role: nextStops.length === 0 ? 'anchor' : 'support',
+            optionality: 'required',
+            location: entity.location ?? undefined,
+            notes: entity.description ?? undefined,
+          });
+        }
+      }
+      const normalizedStops = nextStops.slice(0, 4);
       setSurprisePlan({
         ...seededPlan,
+        stops: normalizedStops,
         originStarterId: starter.id,
+        origin: {
+          kind: 'surprise',
+          source: 'surprise',
+          label: surpriseOriginLabel ?? undefined,
+        },
         metadata: {
           ...metadata,
           createdAt: metadata.createdAt ?? meta.generatedAt,
           lastUpdated: meta.generatedAt,
         },
       });
+      markResultsUpdated('surprise', { skipScroll: true });
     } catch {
       setSurpriseStarter(null);
       setSurpriseMeta(null);
@@ -960,7 +1602,7 @@ export default function HomePageClient() {
       const encoded = serializePlan(surprisePlan);
       router.push(
         withPreservedModeParam(
-          `/create?from=${encodeURIComponent(encoded)}&source=surprise`,
+          `/create?fromEncoded=${encodeURIComponent(encoded)}&source=surprise&from=home_surprise`,
           searchParams
         )
       );
@@ -974,124 +1616,26 @@ export default function HomePageClient() {
     setSurpriseMeta(null);
     setSurprisePlan(null);
     setSurpriseError(null);
+    setSurpriseSaveError(null);
+    setIsSavingSurprisePlan(false);
   }
 
-  function buildSharePlanFromStored(plan: StoredPlan): Plan {
-    const stops: Stop[] = (plan.stops ?? []).map((stop, index) => ({
-      id: stop.id ?? `${plan.id}-stop-${index + 1}`,
-      name: stop.label || `Stop ${index + 1}`,
-      role: index === 0 ? 'anchor' : 'support',
-      optionality: 'required',
-      notes: stop.notes || undefined,
-      duration: stop.time || undefined,
-    }));
-
-    return {
-      id: plan.id,
-      version: '2.0',
-      title: plan.title || 'Untitled plan',
-      intent: plan.notes || '',
-      audience: plan.attendees || '',
-      stops,
-      presentation: {
-        shareModes: ['link', 'qr', 'embed'],
-      },
-      metadata: {
-        createdAt: plan.createdAt,
-        lastUpdated: plan.updatedAt,
-      },
-    };
-  }
-
-  // Helper to build a share URL for a plan
-  function getPlanShareUrl(plan: StoredPlan): string {
-    const encoded = serializePlan(buildSharePlanFromStored(plan));
-    if (typeof window !== 'undefined') {
-      return `${window.location.origin}/plan?p=${encodeURIComponent(encoded)}`;
-    }
-    // Fallback for SSR  still a valid relative link
-    return `/plan?p=${encodeURIComponent(encoded)}`;
-  }
-
-  //  Re-open an existing plan in Calendar
-  function handleOpenPlanCalendar(plan: StoredPlan) {
-    if (!plan.dateTime) {
-      window.alert(
-        'This plan is missing a date/time. Please recreate it from a waypoint.'
+  async function handleUseSurprisePlan() {
+    if (!surprisePlan) return;
+    setIsSavingSurprisePlan(true);
+    setSurpriseSaveError(null);
+    try {
+      const encoded = serializePlan(surprisePlan);
+      router.push(
+        withPreservedModeParam(
+          `/create?fromEncoded=${encodeURIComponent(encoded)}&source=surprise&from=home_surprise`,
+          searchParams
+        )
       );
-      return;
-    }
-
-    const date = new Date(plan.dateTime);
-    if (Number.isNaN(date.getTime())) {
-      window.alert(
-        'This plan has an invalid date/time. Please recreate it from a waypoint.'
-      );
-      return;
-    }
-
-    const iso = date.toISOString(); // e.g. 2025-12-01T08:30:00.000Z
-    const compact = iso.replace(/[-:]/g, '').split('.')[0] + 'Z';
-
-    const params = new URLSearchParams();
-    params.set('text', plan.title);
-    if (plan.notes) params.set('details', plan.notes);
-    if (plan.location) params.set('location', plan.location);
-    params.set('dates', compact);
-
-    const href = `https://calendar.google.com/calendar/render?action=TEMPLATE&${params.toString()}`;
-    window.open(href, '_blank', 'noopener,noreferrer');
-  }
-
-  //  Open an existing plan in Maps
-  function handleOpenPlanMaps(plan: StoredPlan) {
-    const query = plan.location || plan.title;
-    if (!query) {
-      window.alert(
-        'This plan is missing a location. Please recreate it from a waypoint.'
-      );
-      return;
-    }
-
-    const href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-      query
-    )}`;
-    window.open(href, '_blank', 'noopener,noreferrer');
-  }
-
-  //  Edit an existing plan
-  function handleEditPlan(plan: StoredPlan) {
-    router.push(
-      withPreservedModeParam(
-        `/plan?planId=${encodeURIComponent(plan.id)}`,
-        searchParams
-      )
-    );
-  }
-
-  function handleShareRecentV2Plan(plan: PlanIndexItem) {
-    if (!plan.encoded) return;
-    const href =
-      typeof window !== 'undefined'
-        ? `${window.location.origin}/plan?p=${encodeURIComponent(plan.encoded)}`
-        : `/plan?p=${encodeURIComponent(plan.encoded)}`;
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      navigator.clipboard
-        .writeText(href)
-        .then(() => {
-          window.alert('Share link copied to your clipboard.');
-          markPlanShared(plan.id);
-          setRecentV2Plans((prev) =>
-            prev.map((item) =>
-              item.id === plan.id ? { ...item, isShared: true } : item
-            )
-          );
-        })
-        .catch(() => {
-          window.alert('Unable to copy the link. Please open the plan to share.');
-        });
-    } else {
-      window.alert(href);
+    } catch {
+      setSurpriseSaveError("Couldn't save. Try again.");
+    } finally {
+      setIsSavingSurprisePlan(false);
     }
   }
 
@@ -1109,18 +1653,18 @@ export default function HomePageClient() {
         ...next.meta,
         origin,
       };
-      next.origin = origin;
-      const encoded = serializePlan(next);
-      const originHref = '/?templates=1';
-      router.push(
-        withPreservedModeParam(
-          `/create?from=${encodeURIComponent(encoded)}&origin=${encodeURIComponent(originHref)}&returnTo=${encodeURIComponent(returnTo)}`,
-          searchParams
-        )
-      );
-    } catch {
-      // ignore invalid payloads
-    }
+    next.origin = origin;
+    const encoded = serializePlan(next);
+    const originHref = '/?templates=1';
+    router.push(
+      withPreservedModeParam(
+        `/create?fromEncoded=${encodeURIComponent(encoded)}&origin=${encodeURIComponent(originHref)}&returnTo=${encodeURIComponent(returnTo)}&from=home_template_library`,
+        searchParams
+      )
+    );
+  } catch {
+    // ignore invalid payloads
+  }
   }
 
   function handleOpenTemplatePreview(template: TemplateIndexItem) {
@@ -1154,61 +1698,23 @@ export default function HomePageClient() {
     setShowTemplateExplorer(true);
   }
 
-  //  View shared/summary view of a plan
-  function handleViewDetails(plan: StoredPlan) {
-    router.push(`/p/${encodeURIComponent(plan.id)}`);
-  }
-
-  //  Share a plan via link (MVP: copy link and/or open)
-  function handleSharePlan(plan: StoredPlan) {
-    const url = getPlanShareUrl(plan);
-
-    // Try clipboard first if available
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      navigator.clipboard
-        .writeText(url)
-        .then(() => {
-          window.alert('Share link copied to your clipboard.');
-          markPlanShared(plan.id);
-          setRecentPlans((prev) =>
-            prev.map((p) => (p.id === plan.id ? { ...p, isShared: true } : p))
-          );
-          setRecentV2Plans((prev) =>
-            prev.map((p) => (p.id === plan.id ? { ...p, isShared: true } : p))
-          );
-        })
-        .catch(() => {
-          window.alert(`Copy unavailable. Share this link: ${url}`);
-        });
-    } else {
-      // No clipboard: show the link without redirecting
-      window.alert(`Share this link: ${url}`);
-    }
-  }
-
-  //  Remove a single plan
-  function handleRemovePlan(planId: string) {
-    deletePlan(planId);
-    setRecentPlans((prev) => prev.filter((p) => p.id !== planId));
-  }
-
-  function handleRemoveRecentV2(planId: string) {
+  function handleRemoveRecentPlan(planId: string) {
+    setRecentV2Plans((prev) => prev.filter((plan) => plan.id !== planId));
+    removePlanById(planId);
     if (userId) {
-      supabase.from(CLOUD_PLANS_TABLE).delete().eq('id', planId).eq('owner_id', userId).then(() => {
-        setRecentV2Plans((prev) => prev.filter((p) => p.id !== planId));
-      });
-    } else {
-      removePlanById(planId);
-      const refreshed = recentShowSavedOnly ? getSavedPlans() : getRecentPlans();
-      setRecentV2Plans(refreshed.slice(0, 8));
+      void (async () => {
+        try {
+          await supabase
+            .from(CLOUD_PLANS_TABLE)
+            .delete()
+            .eq('id', planId)
+            .eq('owner_id', userId);
+          setRecentV2Plans((prev) => prev.filter((plan) => plan.id !== planId));
+        } catch {
+          // Ignore delete failures; local copy already removed.
+        }
+      })();
     }
-  }
-
-  //  Clear all plans
-  function handleClearAllPlans() {
-    if (!window.confirm('Clear all saved plans from this browser?')) return;
-    clearPlans();
-    setRecentPlans([]);
   }
 
   //  Toggle saved waypoint
@@ -1236,6 +1742,22 @@ export default function HomePageClient() {
     setSavedWaypoints(next);
   }
 
+  const markResultsUpdated = useCallback(
+    (source: 'search' | 'surprise', options?: { skipScroll?: boolean }) => {
+    const stamp = new Date().toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    setResultsCleared(false);
+    setResultsUpdatedAt(`Results updated ${stamp}`);
+    setLastResultsSource(source);
+    if (typeof window !== 'undefined' && !options?.skipScroll) {
+      window.requestAnimationFrame(() => {
+        resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+  }, []);
+
   // Which waypoints should we show in the main list?
   const displayWaypoints: DisplayWaypoint[] = useMemo(() => {
     if (waypointView === 'all') {
@@ -1243,6 +1765,164 @@ export default function HomePageClient() {
     }
     return savedWaypoints.map((saved) => ({ source: 'saved', saved }));
   }, [waypointView, filteredEntities, savedWaypoints]);
+  const visibleWaypoints = resultsCleared ? [] : displayWaypoints;
+  const hasResults = visibleWaypoints.length > 0 || Boolean(resultsUpdatedAt);
+  const currentPlan = useMemo(
+    () =>
+      currentPlanId
+        ? recentV2Plans.find((plan) => plan.id === currentPlanId) ?? null
+        : null,
+    [currentPlanId, recentV2Plans]
+  );
+  const currentPlanShortId = currentPlanId ? currentPlanId.slice(0, 8) : '';
+  const currentPlanLabel =
+    currentPlan?.title?.trim() || (currentPlanShortId ? `Plan ${currentPlanShortId}` : '');
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = window.localStorage.getItem(ACTIVE_PLAN_STORAGE_KEY);
+    setActivePlanId(stored && stored.trim() ? stored : null);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (activePlanId) {
+      window.localStorage.setItem(ACTIVE_PLAN_STORAGE_KEY, activePlanId);
+    } else {
+      window.localStorage.removeItem(ACTIVE_PLAN_STORAGE_KEY);
+    }
+  }, [activePlanId]);
+
+  useEffect(() => {
+    if (!activePlanId) return;
+    if (userId && supabaseLoading) return;
+    const exists = recentV2Plans.some((plan) => plan.id === activePlanId);
+    if (!exists) {
+      setActivePlanId(null);
+    }
+  }, [activePlanId, recentV2Plans, supabaseLoading, userId]);
+
+  useEffect(() => {
+    if (isLoading || error) return;
+    const hasActiveSearch = queryFromUrl.trim() !== '' || moodFromUrl !== 'all';
+    if (!hasActiveSearch) return;
+    const searchKey = `${queryFromUrl}|${moodFromUrl}|${coords?.lat ?? ''}|${
+      coords?.lng ?? ''
+    }`;
+    if (lastCompletedSearchRef.current === searchKey) return;
+    lastCompletedSearchRef.current = searchKey;
+    setSurpriseStarter(null);
+    setSurpriseMeta(null);
+    setSurprisePlan(null);
+    markResultsUpdated('search');
+  }, [
+    coords?.lat,
+    coords?.lng,
+    error,
+    isLoading,
+    markResultsUpdated,
+    moodFromUrl,
+    queryFromUrl,
+  ]);
+
+  useEffect(() => {
+    if (userToggledContinueRef.current) return;
+    setContinueCollapsed(hasResults);
+  }, [hasResults]);
+
+  const selectedDiscoveryDetail = useMemo(() => {
+    if (!selectedDiscoveryItem) return null;
+    const source =
+      selectedDiscoveryItem.source === 'entity'
+        ? selectedDiscoveryItem.entity
+        : selectedDiscoveryItem.saved;
+    const cost: CostTag | undefined =
+      selectedDiscoveryItem.source === 'entity'
+        ? selectedDiscoveryItem.entity.cost
+        : (selectedDiscoveryItem.saved.cost as CostTag | undefined);
+    const proximity: ProximityTag | undefined =
+      selectedDiscoveryItem.source === 'entity'
+        ? selectedDiscoveryItem.entity.proximity
+        : (selectedDiscoveryItem.saved.proximity as ProximityTag | undefined);
+    const useCases: UseCaseTag[] | undefined =
+      selectedDiscoveryItem.source === 'entity'
+        ? selectedDiscoveryItem.entity.useCases
+        : (selectedDiscoveryItem.saved.useCases as UseCaseTag[] | undefined);
+    const timeLabel =
+      selectedDiscoveryItem.source === 'entity'
+        ? selectedDiscoveryItem.entity.timeLabel
+        : undefined;
+    const origin =
+      selectedDiscoveryItem.source === 'saved'
+        ? deriveOrigin(selectedDiscoveryItem.saved)
+        : null;
+    const originLine = origin
+      ? origin.originType === 'District'
+        ? `${origin.primaryLabel} · ${origin.secondaryLabel ?? ''}`.trim()
+        : origin.originType === 'City'
+        ? origin.primaryLabel
+        : origin.originType === 'Template'
+        ? `Template · ${origin.primaryLabel}`
+        : `Search · "${origin.primaryLabel}"`
+      : null;
+    const categoryLabel =
+      useCases && useCases.length > 0
+        ? labelUseCase(useCases[0])
+        : selectedDiscoveryItem.source === 'saved'
+        ? 'Saved place'
+        : 'Place';
+    const decisionHint = cost
+      ? `Price: ${labelCost(cost)}`
+      : timeLabel
+      ? `Hours: ${timeLabel}`
+      : proximity
+      ? labelProximity(proximity)
+      : 'Popular nearby';
+    const mapsQuery = source.location ?? originLine ?? '';
+    const mapsUrl = mapsQuery
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+          mapsQuery
+        )}`
+      : null;
+    const websiteUrl = extractWebsiteUrl(selectedDiscoveryItem) ?? extractWebsiteUrl(source) ?? null;
+    return {
+      title: source.name ?? 'Waypoint',
+      description: source.description ?? '',
+      locationLine: source.location ?? originLine ?? '',
+      categoryLabel,
+      decisionHint,
+      mapsUrl,
+      websiteUrl,
+    };
+  }, [selectedDiscoveryItem]);
+
+  useEffect(() => {
+    if (!selectedDiscoveryItem || !selectedDiscoveryDetail) return;
+    const source =
+      selectedDiscoveryItem.source === 'entity'
+        ? selectedDiscoveryItem.entity
+        : selectedDiscoveryItem.saved;
+    const id = source?.id ?? '∅';
+    const title = selectedDiscoveryDetail.title ?? '∅';
+    const websiteFromDetail =
+      extractWebsiteUrl(selectedDiscoveryDetail ?? null) ?? '∅';
+    const websiteFromItem = extractWebsiteUrl(selectedDiscoveryItem) ?? '∅';
+    const websiteFromSource = source ? extractWebsiteUrl(source) ?? '∅' : '∅';
+    const websiteCandidate =
+      websiteFromDetail !== '∅'
+        ? websiteFromDetail
+        : websiteFromItem !== '∅'
+        ? websiteFromItem
+        : websiteFromSource !== '∅'
+        ? websiteFromSource
+        : '∅';
+    void id;
+    void title;
+    void websiteFromDetail;
+    void websiteFromItem;
+    void websiteFromSource;
+    void websiteCandidate;
+  }, [selectedDiscoveryDetail, selectedDiscoveryItem]);
 
   const devSharePlan = useMemo(() => {
     const base = createEmptyPlan({
@@ -1293,6 +1973,8 @@ export default function HomePageClient() {
   const [surpriseMeta, setSurpriseMeta] = useState<SurpriseStarterMeta | null>(null);
   const [surprisePlan, setSurprisePlan] = useState<Plan | null>(null);
   const [surpriseError, setSurpriseError] = useState<string | null>(null);
+  const [isSavingSurprisePlan, setIsSavingSurprisePlan] = useState(false);
+  const [surpriseSaveError, setSurpriseSaveError] = useState<string | null>(null);
   const [isSurpriseLoading, setIsSurpriseLoading] = useState(false);
   const [surpriseNonce, setSurpriseNonce] = useState(0);
 
@@ -1300,7 +1982,75 @@ export default function HomePageClient() {
     () => [...v6Starters.V6_TEMPLATE_STARTERS, ...v6Starters.IDEA_DATE_IMPORTED_STARTERS],
     []
   );
-  const waypointHeaderLabel = 'Your Waypoints';
+  void copyStatus;
+  void isPromotingStarter;
+  void pendingStarterMessage;
+  void starterOptions;
+  const previewPlaces = useMemo(() => data.slice(0, 8), [data]);
+  const resumePlan = useMemo(
+    () => (recentV2Plans.length > 0 && !recentShowSavedOnly ? recentV2Plans[0] : null),
+    [recentShowSavedOnly, recentV2Plans]
+  );
+  const moreRecentPlans = useMemo(() => {
+    if (!resumePlan) return recentV2Plans.slice(0, 3);
+    return recentV2Plans.filter((plan) => plan.id !== resumePlan.id).slice(0, 3);
+  }, [recentV2Plans, resumePlan]);
+  const experiencePreviewQueries = useMemo(
+    () =>
+      VENUE_EXPERIENCES_V2.flatMap((experience) =>
+        buildSeededTemplatePreviewQueries(
+          getTemplateSeedById(experience.id) ?? {
+            id: experience.id,
+            version: 1,
+            kind: 'experience',
+            origin: 'curated',
+            title: experience.title,
+            description: experience.description,
+            stops: (experience.seededStops && experience.seededStops.length > 0
+              ? experience.seededStops
+              : experience.defaultQuery
+              ? [experience.defaultQuery]
+              : []
+            ).map((label, index) => ({
+              id: `${experience.id}-stop-${index + 1}`,
+              label,
+              role: index === 0 ? 'anchor' : 'support',
+              placeRef: { query: label },
+            })),
+          },
+          coords
+        )
+      ),
+    [coords]
+  );
+  const templatePreviewQueries = useMemo(
+    () =>
+      WAYPOINT_TEMPLATES.flatMap((template) =>
+        buildSeededTemplatePreviewQueries(
+          getTemplateSeedById(template.id) ?? {
+            id: template.id,
+            version: 1,
+            kind: 'pack',
+            origin: 'template',
+            title: template.name,
+            description: template.description,
+            stops: (template.intentQueryHints ?? []).map((label, index) => ({
+              id: `${template.id}-stop-${index + 1}`,
+              label,
+              role: index === 0 ? 'anchor' : 'support',
+              placeRef: { query: label },
+            })),
+          },
+          coords
+        )
+      ),
+    [coords]
+  );
+  const allPreviewQueries = useMemo(
+    () => [...experiencePreviewQueries, ...templatePreviewQueries],
+    [experiencePreviewQueries, templatePreviewQueries]
+  );
+  const targetPlanId = currentPlanId;
   const surpriseOriginLabel = useMemo(() => {
     if (!surpriseMeta) return null;
     if (surpriseMeta.origin === 'surprise') return 'Generated by Surprise';
@@ -1321,10 +2071,54 @@ export default function HomePageClient() {
     const detail = descriptors.length > 0 ? ` with ${descriptors.join(' and ')}` : '';
     return `${origin}. ${stopPhrase}${detail}.`;
   }, [surpriseOriginLabel, surprisePlan]);
+  const showSurprisePlan = lastResultsSource === 'surprise' && Boolean(surprisePlan);
+
+  useEffect(() => {
+    if (queryFromUrl || resultsUpdatedAt || showSurprisePlan) {
+      setShowExploreMore(true);
+    }
+  }, [queryFromUrl, resultsUpdatedAt, showSurprisePlan]);
+
+  useEffect(() => {
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const pending = allPreviewQueries.filter(
+      (query) =>
+        !PLACE_PREVIEW_CACHE.has(query.key) && !PLACE_PREVIEW_INFLIGHT.has(query.key)
+    );
+    if (pending.length === 0) return undefined;
+
+    let index = 0;
+    let active = 0;
+    const runNext = () => {
+      if (cancelled) return;
+      if (index >= pending.length && active === 0) return;
+      while (active < PLACE_PREVIEW_MAX_CONCURRENCY && index < pending.length) {
+        const query = pending[index++];
+        active += 1;
+        resolvePlacePreview(query, coords)
+          .finally(() => {
+            active -= 1;
+            if (!cancelled) {
+              setPreviewTick((tick) => tick + 1);
+              runNext();
+            }
+          });
+      }
+    };
+    runNext();
+    return () => {
+      cancelled = true;
+    };
+  }, [allPreviewQueries, coords]);
 
   function handleOpenSharedView() {
     router.push(shareLinks.relativePath);
   }
+  void handleOpenSharedView;
 
   async function handleCopyLink() {
     if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
@@ -1338,6 +2132,7 @@ export default function HomePageClient() {
       // Ignore copy failures in dev helper
     }
   }
+  void handleCopyLink;
 
   function handleScrollToAuth() {
     setShowAuthPanel(true);
@@ -1382,6 +2177,7 @@ export default function HomePageClient() {
     return Object.keys(mapped).length > 0 ? mapped : undefined;
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- buildPlanFromStarter is intentionally defined inline
   function buildPlanFromStarter(starter: v6Starters.PlanStarter, owner?: string | null): Plan {
     const timestamp = new Date().toISOString();
     const base = createEmptyPlan({
@@ -1443,7 +2239,7 @@ export default function HomePageClient() {
         setSelectedStarter(null);
         router.push(
           withPreservedModeParam(
-            `/create?from=${encodeURIComponent(encoded)}`,
+            `/create?fromEncoded=${encodeURIComponent(encoded)}&from=home_starter`,
             searchParams
           )
         );
@@ -1454,7 +2250,7 @@ export default function HomePageClient() {
         isPromotingRef.current = false;
       }
     },
-    [router, userId]
+    [buildPlanFromStarter, router, searchParams, userId]
   );
 
   useEffect(() => {
@@ -1480,6 +2276,7 @@ export default function HomePageClient() {
     setSelectedStarter(starter);
     setPendingStarterMessage(null);
   }
+  void handleSelectStarter;
 
   function handleStartSelectedStarter() {
     if (!selectedStarter) return;
@@ -1497,30 +2294,324 @@ export default function HomePageClient() {
     }
     void startStarterDraft(selectedStarter);
   }
+  void handleStartSelectedStarter;
 
   function handleClearSelectedStarter() {
     setSelectedStarter(null);
     setPendingStarterMessage(null);
+  }
+  void handleClearSelectedStarter;
+
+  function handleSelectDiscoveryItem(item: DisplayWaypoint) {
+    setSelectedDiscoveryItem(item);
+    setAddToPlanError(null);
+    setAddToPlanSuccess(null);
+  }
+
+  function scheduleAddToPlanTick() {
+    if (addToPlanTickScheduledRef.current) return;
+    addToPlanTickScheduledRef.current = true;
+    queueMicrotask(() => {
+      addToPlanTickRef.current += 1;
+      addToPlanDedupeRef.current.clear();
+      addToPlanTickScheduledRef.current = false;
+    });
+  }
+
+  function clearAddToPlanTimeout() {
+    if (addToPlanTimeoutRef.current) {
+      window.clearTimeout(addToPlanTimeoutRef.current);
+      addToPlanTimeoutRef.current = null;
+    }
+  }
+
+  async function handleAddToCurrentPlan(item: DisplayWaypoint, planId: string) {
+    if (addToPlanInFlightRef.current) return;
+    const source = item.source === 'entity' ? item.entity : item.saved;
+    scheduleAddToPlanTick();
+    const dedupeKey = `${planId}:${source.id}`;
+    if (addToPlanDedupeRef.current.has(dedupeKey)) {
+      return;
+    }
+    addToPlanDedupeRef.current.add(dedupeKey);
+
+    addToPlanInFlightRef.current = true;
+    setIsAddingToPlan(true);
+    setAddToPlanError(null);
+    setAddToPlanSuccess(null);
+    clearAddToPlanTimeout();
+
+    try {
+      const plan = loadSavedPlan(planId);
+      if (!plan) {
+        throw new Error('missing-plan');
+      }
+      const now = new Date().toISOString();
+      const normalizedSlot = slotHint?.trim().toLowerCase() ?? '';
+      const hasSlot = Boolean(normalizedSlot);
+      const slotParam = searchParams.get('slot');
+      let nextPlan: Plan | null = null;
+      let slotFillSuccess = false;
+      if (hasSlot) {
+        const slotHintNormalized = normalizeLabel(slotHint ?? '');
+        const placeholderIndexes = (plan.stops ?? [])
+          .map((stop, index) => (stop.notes === 'Pick from search results.' ? index : -1))
+          .filter((index) => index >= 0);
+        let replacementIndex = -1;
+        for (const index of placeholderIndexes) {
+          const stop = plan.stops?.[index];
+          const stopNameNormalized = normalizeLabel(stop?.name ?? '');
+          if (stopNameNormalized && stopNameNormalized === slotHintNormalized) {
+            replacementIndex = index;
+            break;
+          }
+        }
+        if (replacementIndex === -1) {
+          for (const index of placeholderIndexes) {
+            const stop = plan.stops?.[index];
+            const stopNameNormalized = normalizeLabel(stop?.name ?? '');
+            if (
+              stopNameNormalized &&
+              slotHintNormalized &&
+              stopNameNormalized.startsWith(slotHintNormalized)
+            ) {
+              replacementIndex = index;
+              break;
+            }
+          }
+        }
+        if (replacementIndex === -1) {
+          for (const index of placeholderIndexes) {
+            const stop = plan.stops?.[index];
+            const stopNameNormalized = normalizeLabel(stop?.name ?? '');
+            if (
+              stopNameNormalized &&
+              slotHintNormalized &&
+              stopNameNormalized.includes(slotHintNormalized)
+            ) {
+              replacementIndex = index;
+              break;
+            }
+          }
+        }
+        if (replacementIndex === -1 && placeholderIndexes.length === 1) {
+          replacementIndex = placeholderIndexes[0];
+        }
+        if (replacementIndex !== -1) {
+          const updatedStops = (plan.stops ?? []).map((stop, index) =>
+            index === replacementIndex
+              ? {
+                  ...stop,
+                  name: source.name ?? stop.name ?? 'New stop',
+                  location: source.location ?? stop.location,
+                  notes: source.description ?? undefined,
+                }
+              : stop
+          );
+          nextPlan = {
+            ...plan,
+            stops: updatedStops,
+            metadata: {
+              ...(plan.metadata ?? {}),
+              lastUpdated: now,
+            },
+          };
+          slotFillSuccess = true;
+        }
+      }
+      if (!nextPlan) {
+        const stopId =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `stop_${Math.random().toString(36).slice(2, 8)}`;
+        const nextStop: Stop = {
+          id: stopId,
+          name: source.name ?? 'New stop',
+          role: 'support',
+          optionality: 'required',
+          location: source.location ?? undefined,
+          notes: source.description ?? undefined,
+        };
+        nextPlan = {
+          ...plan,
+          stops: [...(plan.stops ?? []), nextStop],
+          metadata: {
+            ...(plan.metadata ?? {}),
+            lastUpdated: now,
+          },
+        };
+      }
+      await Promise.resolve(upsertRecentPlan(nextPlan));
+      const encoded = serializePlan(nextPlan);
+      const nextIndexItem: PlanIndexItem = {
+        id: planId,
+        title: nextPlan.title || 'Waypoint',
+        intent: nextPlan.intent,
+        audience: nextPlan.audience || undefined,
+        encoded,
+        updatedAt: now,
+        isSaved: false,
+        isShared: isPlanShared(planId),
+      };
+      setRecentV2Plans((prev) => [
+        nextIndexItem,
+        ...prev.filter((entry) => entry.id !== planId),
+      ]);
+      const successLabel =
+        slotFillSuccess && slotHint ? `Added to ${slotHint}` : 'Added to plan';
+      setAddToPlanSuccess(successLabel);
+      const successTimeoutMs = slotFillSuccess ? 3000 : 2000;
+      addToPlanTimeoutRef.current = window.setTimeout(() => {
+        setAddToPlanSuccess(null);
+      }, successTimeoutMs);
+      // no auto-scroll; CTA handles optional jump
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      const planIdParam = searchParams.get('planId');
+      if (slotFillSuccess && (slotParam || planIdParam)) {
+        const gateKey = `slot-cleared:${planId}:${normalizedSlot || slotParam?.toLowerCase() || 'slot'}`;
+        if (!addToPlanDedupeRef.current.has(gateKey)) {
+          addToPlanDedupeRef.current.add(gateKey);
+          const nextParams = new URLSearchParams(searchParams.toString());
+          nextParams.delete('slot');
+          nextParams.delete('planId');
+          const nextQuery = nextParams.toString();
+          const nextHref = nextQuery ? `${pathname}?${nextQuery}` : pathname;
+          router.replace(nextHref);
+        }
+      } else {
+        router.push(
+          withPreservedModeParam(`/plans/${encodeURIComponent(planId)}`, searchParams)
+        );
+      }
+    } catch {
+      setAddToPlanError("Couldn't add — try again or start a new plan.");
+    } finally {
+      addToPlanInFlightRef.current = false;
+      setIsAddingToPlan(false);
+    }
+  }
+
+  async function handleStartPlanFromItem(item: DisplayWaypoint) {
+    if (addToPlanInFlightRef.current) return;
+    const source = item.source === 'entity' ? item.entity : item.saved;
+    scheduleAddToPlanTick();
+    addToPlanInFlightRef.current = true;
+    setIsAddingToPlan(true);
+    setAddToPlanError(null);
+    setAddToPlanSuccess(null);
+    clearAddToPlanTimeout();
+
+    try {
+      const now = new Date().toISOString();
+      const planId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `plan_${Math.random().toString(36).slice(2, 8)}`;
+      const nextPlan = createEmptyPlan({
+        title: source.name ?? 'New plan',
+        intent: 'What do we want to accomplish?',
+        audience: 'me-and-friends',
+      });
+      const stopId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `stop_${Math.random().toString(36).slice(2, 8)}`;
+      const anchorStop: Stop = {
+        id: stopId,
+        name: source.name ?? 'Anchor stop',
+        role: 'anchor',
+        optionality: 'required',
+        location: source.location ?? source.description,
+        notes: source.description ?? undefined,
+      };
+      const placeholderStop: Stop = {
+        id:
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `stop_${Math.random().toString(36).slice(2, 8)}`,
+        name: 'Next stop',
+        role: 'support',
+        optionality: 'required',
+        notes: 'Pick from search results.',
+      };
+        const planWithStop: Plan = {
+          ...nextPlan,
+          id: planId,
+          stops: [anchorStop, placeholderStop],
+          metadata: {
+            ...(nextPlan.metadata ?? {}),
+            createdAt: now,
+            lastUpdated: now,
+          },
+        };
+        const encoded = serializePlan(planWithStop);
+        const params = new URLSearchParams();
+        params.set('fromEncoded', encoded);
+        params.set('from', 'home_discovery_item');
+        router.push(withPreservedModeParam(`/create?${params.toString()}`, searchParams));
+      } catch {
+        setAddToPlanError("Couldn't start a plan — try again.");
+      } finally {
+      addToPlanInFlightRef.current = false;
+      setIsAddingToPlan(false);
+    }
+  }
+
+  function handleUseWaypointTemplate(template: WaypointTemplate) {
+    const params = new URLSearchParams();
+    params.set('preset', template.id);
+    params.set('from', 'home_template_packs');
+    pushCreateWithParams(params);
+  }
+
+  function handleForkExperience(experience: VenueExperienceV2) {
+    const seededTemplate = getTemplateSeedById(experience.id);
+    if (seededTemplate && !validateTemplateSeed(seededTemplate).ok) {
+      if (process.env.NODE_ENV === 'production') {
+        return;
+      }
+    }
+    const params = new URLSearchParams();
+    params.set('seed', experience.id);
+    params.set('from', 'home_experiences');
+    pushCreateWithParams(params);
   }
 
   return (
     <main className="min-h-screen flex flex-col items-center bg-slate-950 text-slate-50 px-4 py-10">
       <div className="w-full max-w-3xl space-y-6">
         {/* Header */}
-        <header className="space-y-3">
+        <header className="space-y-4">
           <div className="space-y-2">
-            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Plan, share, align</p>
+            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">
+              Inspire · Decide · Plan
+            </p>
             <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight text-slate-50">
-              Waypoint keeps your plans and people in sync.
+              Find something great nearby.
             </h1>
             <p className="text-sm text-slate-300">
-              Draft the plan, lock the details, and share a read-only link so everyone knows the what, when, and where.
-            </p>
-            <p className="text-sm text-slate-400">
-              Start from an idea, adapt it for your crew, and keep one source of truth. Preview without an account; sign in to save, edit, or share.
+              Explore a few ideas and turn the best one into a plan.
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                exploreSectionRef.current?.scrollIntoView({
+                  behavior: 'smooth',
+                  block: 'start',
+                });
+              }}
+              className={ctaClass('chip')}
+            >
+              Explore ideas
+            </button>
+            <Link href="/create" className={ctaClass('primary')}>
+              Create a plan
+            </Link>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+            <span className="uppercase tracking-wide text-slate-600">Browse by area</span>
             <Link href={cityDistrictsHref} className={ctaClass('chip')}>
               City districts
             </Link>
@@ -1531,9 +2622,9 @@ export default function HomePageClient() {
           {!userId && (
             <div className="rounded-md border border-slate-800 bg-slate-900/70 px-3 py-3 text-sm text-slate-100 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
-                <p className="font-semibold text-slate-50">Try Waypoint free. Sign in when you want to sync.</p>
+                <p className="font-semibold text-slate-50">Explore freely. Sign in when you want to save.</p>
                 <p className="text-[12px] text-slate-400">
-                  You can explore, preview, and generate plans. Sign in to save, edit, or share them across devices.
+                  Keep browsing without an account, then sign in to sync plans across devices.
                 </p>
               </div>
               <button
@@ -1553,9 +2644,6 @@ export default function HomePageClient() {
             </div>
           ) : null}
         </header>
-        <div className="rounded-md border border-slate-800 bg-slate-900/50 px-3 py-2 text-[11px] text-slate-300">
-          You’re here to explore. Nothing you do here commits you — just browse, follow your curiosity, and look around.
-        </div>
         {migrationMessage ? (
           <div className="rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2 text-[11px] text-emerald-100">
             {migrationMessage}
@@ -1576,20 +2664,1339 @@ export default function HomePageClient() {
           </div>
         ) : null}
 
+        <section
+          ref={exploreSectionRef}
+          className="space-y-3 rounded-xl border border-slate-800/40 bg-slate-900/30 px-4 py-4"
+        >
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold text-slate-200">Venue experiences</h2>
+            <p className="text-[11px] text-slate-500">
+              Hand-picked loops with real places.
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {VENUE_EXPERIENCES_V2.map((experience) => {
+              const previewId = `experience:${experience.id}`;
+              const seededTemplate = getTemplateSeedById(experience.id);
+              const seedValidation = seededTemplate
+                ? validateTemplateSeed(seededTemplate)
+                : { ok: false, issues: ['Missing template seed'] };
+              const isCuratedBlocked =
+                !seedValidation.ok && process.env.NODE_ENV === 'production';
+              const isCuratedDisabled =
+                !seedValidation.ok && process.env.NODE_ENV !== 'production';
+              if (isCuratedBlocked) {
+                return null;
+              }
+              const previewQueries = seededTemplate
+                ? buildSeededTemplatePreviewQueries(seededTemplate, coords)
+                : buildExperiencePreviewQueries(experience, coords);
+              const previewItems = getPreviewDisplay(previewQueries);
+              const fallbackStops =
+                seededTemplate?.stops.map((stop) => stop.label) ??
+                (experience.seededStops && experience.seededStops.length > 0
+                  ? experience.seededStops
+                  : experience.defaultQuery
+                  ? [experience.defaultQuery]
+                  : []);
+              const resolvedStopNames = seededTemplate
+                ? buildResolvedStopNameMap(seededTemplate, coords)
+                : undefined;
+              const previewLabels = seededTemplate
+                ? seededTemplate.stops.map((stop, index) =>
+                    getTemplateStopDisplayLabel(
+                      stop,
+                      resolvedStopNames?.[stop.id] ?? previewItems[index]?.label
+                    )
+                  )
+                : previewItems.length > 0
+                ? previewItems.map((item) => item.label)
+                : fallbackStops;
+              return (
+                <div
+                  key={experience.id}
+                  className="rounded-lg border border-slate-800/60 bg-slate-950/40 px-3 py-3 space-y-2"
+                  style={experience.accent ? { borderColor: experience.accent } : undefined}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[10px] text-slate-400">
+                      Curated experience
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-slate-100">{experience.title}</p>
+                    <p className="text-[11px] text-slate-400">
+                      {experience.venueName} · {experience.locationHint}
+                    </p>
+                    <p className="text-[10px] text-slate-500">
+                      Ready to go · Real places included
+                    </p>
+                    <p className="text-[11px] text-slate-400 line-clamp-2">
+                      {experience.description}
+                    </p>
+                  </div>
+                  {previewLabels.length > 0 ? (
+                    <p className="text-[11px] text-slate-500">
+                      Includes:{' '}
+                      {previewLabels.slice(0, 3).map((label, index) => (
+                        <span
+                          key={`${experience.id}-preview-${label}-${index}`}
+                          title={previewItems[index]?.title}
+                          className="text-slate-300"
+                        >
+                          {label}
+                          {index < Math.min(previewLabels.length, 3) - 1 ? ' · ' : ''}
+                        </span>
+                      ))}
+                      {previewLabels.length > 3 ? (
+                        <span className="text-slate-500">
+                          {' '}
+                          · +{previewLabels.length - 3} more
+                        </span>
+                      ) : null}
+                    </p>
+                  ) : null}
+                  <div className="flex flex-wrap gap-2 text-[10px] text-slate-400">
+                    {experience.locationHint ? (
+                      <span className="rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                        {experience.locationHint}
+                      </span>
+                    ) : null}
+                    <span className="rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
+                      {experience.defaultStopCount} stops
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleForkExperience(experience)}
+                      disabled={isAddingToPlan || isCuratedDisabled}
+                      className={`${ctaClass('primary')} text-[10px] ${
+                        isAddingToPlan || isCuratedDisabled
+                          ? 'opacity-60 cursor-not-allowed'
+                          : ''
+                      }`}
+                      >
+                        Use as seed
+                      </button>
+                    {isCuratedDisabled ? (
+                      <span className="text-[10px] text-amber-300">
+                        This curated plan needs baked placeIds (dev).
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenPreviewId((prev) => (prev === previewId ? null : previewId))
+                      }
+                      className="text-[10px] text-slate-400 hover:text-slate-100 underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-slate-200"
+                    >
+                      Preview
+                    </button>
+                  </div>
+                  {openPreviewId === previewId ? (
+                    <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 space-y-2">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                        Preview
+                      </p>
+                      <ul className="space-y-1 text-[11px] text-slate-300">
+                        {previewLabels.slice(0, 4).map((label, index) => (
+                          <li key={`${experience.id}-${label}-${index}`}>• {label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="space-y-3 rounded-xl border border-slate-800/40 bg-slate-900/30 px-4 py-4">
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold text-slate-200">Template packs</h2>
+            <p className="text-[11px] text-slate-500">
+              Starting points you can remix.
+            </p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {WAYPOINT_TEMPLATES.map((template) => {
+              const previewId = `pack:${template.id}`;
+              const seededTemplate = getTemplateSeedById(template.id);
+              const previewQueries = seededTemplate
+                ? buildSeededTemplatePreviewQueries(seededTemplate, coords)
+                : buildPackPreviewQueries(template, coords);
+              const previewItems = getPreviewDisplay(previewQueries);
+              const fallbackStops =
+                seededTemplate?.stops.map((stop) => stop.label) ??
+                template.intentQueryHints ??
+                [];
+              const resolvedStopNames = seededTemplate
+                ? buildResolvedStopNameMap(seededTemplate, coords)
+                : undefined;
+              const previewLabels = seededTemplate
+                ? seededTemplate.stops.map((stop, index) =>
+                    getTemplateStopDisplayLabel(
+                      stop,
+                      resolvedStopNames?.[stop.id] ?? previewItems[index]?.label
+                    )
+                  )
+                : previewItems.length > 0
+                ? previewItems.map((item) => item.label)
+                : fallbackStops;
+              return (
+                <div
+                  key={template.id}
+                  className="rounded-lg border border-slate-800/60 bg-slate-950/40 px-3 py-3 flex flex-col gap-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[10px] text-slate-400">
+                      Template pack
+                    </span>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="text-lg">{template.icon ?? '📌'}</span>
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-semibold text-slate-100">
+                        {template.name}
+                      </p>
+                      <p className="text-[11px] text-slate-400">{template.description}</p>
+                      <p className="text-[10px] text-slate-500">
+                        Starting point · You&apos;ll pick places
+                      </p>
+                      <p className="text-[10px] text-slate-500">
+                        {template.defaultStops} stops · starter kit
+                      </p>
+                    </div>
+                  </div>
+                  {previewLabels.length > 0 ? (
+                    <p className="text-[11px] text-slate-500">
+                      Includes:{' '}
+                      {previewLabels.slice(0, 3).map((label, index) => (
+                        <span
+                          key={`${template.id}-preview-${label}-${index}`}
+                          title={previewItems[index]?.title}
+                          className="text-slate-300"
+                        >
+                          {label}
+                          {index < Math.min(previewLabels.length, 3) - 1 ? ' · ' : ''}
+                        </span>
+                      ))}
+                    </p>
+                  ) : null}
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleUseWaypointTemplate(template)}
+                      className={`${ctaClass('primary')} text-[11px]`}
+                      disabled={isAddingToPlan}
+                      >
+                        Start with this template
+                      </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenPreviewId((prev) => (prev === previewId ? null : previewId))
+                      }
+                      className="text-[10px] text-slate-400 hover:text-slate-100 underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-slate-200"
+                    >
+                      Preview
+                    </button>
+                  </div>
+                  {openPreviewId === previewId ? (
+                    <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 space-y-2">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                        Preview
+                      </p>
+                      <ul className="space-y-1 text-[11px] text-slate-300">
+                        {previewLabels.slice(0, 4).map((label, index) => (
+                          <li key={`${template.id}-${label}-${index}`}>• {label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
         <div ref={authPanelRef}>{showAuthPanel ? <AuthPanel /> : null}</div>
 
-        <section className="rounded-md border border-slate-800 bg-slate-900/50 px-4 py-3 space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-1">
-              <p className="text-sm font-semibold text-slate-200">Create a plan</p>
+        <section
+          id="continue-section"
+          className={`space-y-2 pt-4 mt-2 border-t border-slate-900/40 ${
+            !resumePlan && moreRecentPlans.length === 0 ? 'opacity-90' : ''
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="space-y-0.5">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Continue
+              </h2>
               <p className="text-[11px] text-slate-500">
-                Step into Create when you're ready to author. Templates and starting points live there.
+                Your recent plans, ready to resume.
               </p>
             </div>
-            <Link href="/create" className={ctaClass('primary')}>
-              Create a plan
-            </Link>
+            <button
+              type="button"
+              onClick={() => {
+                userToggledContinueRef.current = true;
+                setContinueCollapsed((prev) => !prev);
+              }}
+              className="text-[11px] text-slate-400 hover:text-slate-200"
+            >
+              {continueCollapsed ? 'Show' : 'Hide'}
+            </button>
           </div>
+          {!continueCollapsed && (
+            <>
+              <div className="space-y-3">
+                {!hydrated ? (
+                  <p className="text-xs text-slate-400">Loading your plans...</p>
+                ) : userId && supabaseLoading ? (
+                  <p className="text-xs text-slate-400">Loading your plans...</p>
+                ) : !resumePlan ? (
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-3 text-xs text-slate-400 space-y-1">
+                    <p className="text-slate-300">No plans yet.</p>
+                    <p>Plans you make will show up here for quick return.</p>
+                    <p className="text-slate-500">Start with the ideas above to create your first one.</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="rounded-lg border border-slate-800/60 bg-slate-950/40 px-4 py-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                        Resume last plan
+                      </p>
+                      <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-slate-100 truncate">
+                            {resumePlan.title}
+                          </p>
+                          <p
+                            className="text-[11px] text-slate-400"
+                            title={new Date(resumePlan.updatedAt).toLocaleString()}
+                          >
+                            Updated{' '}
+                            {new Date(resumePlan.updatedAt).toLocaleDateString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                            })}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!resumePlan.encoded) return;
+                              setActivePlanId(resumePlan.id);
+                              router.push(
+                                withPreservedModeParam(
+                                  `/plans/${encodeURIComponent(resumePlan.id)}`,
+                                  searchParams
+                                )
+                              );
+                            }}
+                            className={`${ctaClass('primary')} text-[11px]`}
+                          >
+                            Resume
+                          </button>
+                          {removeCandidateId === resumePlan.id ? (
+                            <div className="flex items-center gap-2 text-[11px]">
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveRecentPlan(resumePlan.id)}
+                                className="text-rose-300 hover:text-rose-100"
+                              >
+                                Confirm
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRemoveCandidateId(null)}
+                                className="text-slate-400 hover:text-slate-200"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setRemoveCandidateId(resumePlan.id)}
+                              className="text-[11px] text-slate-400 hover:text-rose-200"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {moreRecentPlans.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                          More recent
+                        </p>
+                        <ul className="space-y-2">
+                          {moreRecentPlans.map((plan) => (
+                            <li
+                              key={plan.id}
+                              className="rounded-md border border-slate-800/60 bg-slate-950/40 px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <p className="font-medium text-slate-100 truncate">
+                                  {plan.title}
+                                </p>
+                                <p
+                                  className="text-[11px] text-slate-400"
+                                  title={new Date(plan.updatedAt).toLocaleString()}
+                                >
+                                  Updated{' '}
+                                  {new Date(plan.updatedAt).toLocaleDateString(undefined, {
+                                    month: 'short',
+                                    day: 'numeric',
+                                  })}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (!plan.encoded) return;
+                                    setActivePlanId(plan.id);
+                                    router.push(
+                                      withPreservedModeParam(
+                                        `/plans/${encodeURIComponent(plan.id)}`,
+                                        searchParams
+                                      )
+                                    );
+                                  }}
+                                  className={`${ctaClass('chip')} text-[10px]`}
+                                >
+                                  Open
+                                </button>
+                                {removeCandidateId === plan.id ? (
+                                  <div className="flex items-center gap-2 text-[11px]">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveRecentPlan(plan.id)}
+                                      className="text-rose-300 hover:text-rose-100"
+                                    >
+                                      Confirm
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setRemoveCandidateId(null)}
+                                      className="text-slate-400 hover:text-slate-200"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setRemoveCandidateId(plan.id)}
+                                    className="text-[10px] text-slate-400 hover:text-rose-200"
+                                  >
+                                    Remove
+                                  </button>
+                                )}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </section>
+
+        <section className="space-y-2 rounded-xl border border-slate-800/40 bg-slate-900/30 px-4 py-4">
+          <div className="space-y-0.5">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Insights
+            </h2>
+            <p className="text-[11px] text-slate-500">Explore your plan patterns.</p>
+          </div>
+          <Link
+            href="/insights/heatmap"
+            className="rounded-lg border border-slate-800/60 bg-slate-950/40 px-3 py-2 flex items-start justify-between gap-3 text-left text-sm text-slate-200 hover:border-slate-700 hover:text-slate-100"
+          >
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-slate-100">
+                District heat map (v1)
+              </p>
+              <p className="text-[11px] text-slate-400">
+                Your completed plans, grouped by place and time.
+              </p>
+            </div>
+            <span className="text-[11px] text-slate-500">View</span>
+          </Link>
+        </section>
+
+        <section className="space-y-4 rounded-xl border border-slate-800/30 bg-slate-900/20 px-4 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="space-y-0.5">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Explore more places
+              </h2>
+              <p className="text-[11px] text-slate-500">
+                Browse more places when you want to go off-menu.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowExploreMore((prev) => !prev)}
+              className={`${ctaClass('chip')} text-[11px]`}
+              aria-expanded={showExploreMore}
+              aria-controls="explore-more-panel"
+            >
+              {showExploreMore ? 'Hide' : 'Browse'}
+            </button>
+          </div>
+          {!showExploreMore ? (
+            <div className="space-y-3">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                Popular picks
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {previewPlaces.map((place) => {
+                  const costLabel = place.cost ? `Price: ${labelCost(place.cost)}` : null;
+                  const timeLabel = place.timeLabel ? `Hours: ${place.timeLabel}` : null;
+                  const hint = [place.location, costLabel || timeLabel || 'Popular nearby']
+                    .filter(Boolean)
+                    .join(' · ');
+                  return (
+                    <div
+                      key={place.id}
+                      className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2"
+                    >
+                      <p className="text-sm font-medium text-slate-100">{place.name}</p>
+                      {hint ? (
+                        <p className="text-[11px] text-slate-500">{hint}</p>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                {isLoading && previewPlaces.length === 0 ? (
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-3 text-xs text-slate-500">
+                    Loading places...
+                  </div>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowExploreMore(true)}
+                className={`${ctaClass('chip')} text-[11px]`}
+              >
+                Browse all places
+              </button>
+            </div>
+          ) : (
+            <div id="explore-more-panel" className="space-y-6">
+        {showSurprisePlan ? (
+          <section className="space-y-3">
+            <div className="rounded-xl border border-slate-700/70 bg-slate-900/80 ring-1 ring-emerald-500/10 shadow-md shadow-slate-950/40 px-4 py-4 space-y-3">
+              <div className="space-y-1">
+                <p className="text-[11px] uppercase tracking-wide text-emerald-200/80 flex items-center gap-2">
+                  <span className="text-[12px]">✦</span>
+                  Surprise plan
+                </p>
+                <h3 className="text-lg font-semibold text-slate-100">
+                  {surprisePlan?.title || 'Surprise plan'}
+                </h3>
+                <p className="text-[10px] text-slate-500">Ready to go</p>
+                {surpriseWhyText ? (
+                  <p className="text-[11px] text-slate-400">{surpriseWhyText}</p>
+                ) : null}
+              </div>
+              <ul className="space-y-2">
+                {surprisePlan?.stops?.map((stop, index) => {
+                  const stopImageUrl = extractImageUrl(stop);
+                  const hasStopImage = Boolean(stopImageUrl);
+                  return (
+                    <li
+                      key={stop.id ?? `${index}`}
+                      className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                          <div className="h-12 w-12 shrink-0 rounded-md border border-slate-800 bg-slate-900/70 overflow-hidden">
+                            {hasStopImage ? (
+                              // eslint-disable-next-line @next/next/no-img-element -- small, dynamic image
+                              <img
+                                src={stopImageUrl ?? ''}
+                                alt=""
+                                className="h-full w-full object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="h-full w-full bg-slate-800/60 flex flex-col items-center justify-center gap-1 text-[10px] text-slate-300">
+                                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-700/70 text-[11px] text-slate-200">
+                                  ◇
+                                </span>
+                                <span className="text-[9px] uppercase tracking-wide text-slate-500">
+                                  Stop
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-sm font-semibold text-slate-100">
+                              {stop.name || `Stop ${index + 1}`}
+                            </p>
+                            {stop.location ? (
+                              <p className="text-[11px] text-slate-500">{stop.location}</p>
+                            ) : null}
+                            {stop.notes ? (
+                              <p className="text-[11px] text-slate-400">{stop.notes}</p>
+                            ) : null}
+                          </div>
+                        </div>
+                        <span className="text-[10px] uppercase tracking-wide text-slate-500">
+                          {stop.role}
+                        </span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              {surpriseError ? (
+                <p className="text-[11px] text-amber-200">{surpriseError}</p>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSurpriseMe()}
+                  disabled={isSurpriseLoading || isSavingSurprisePlan}
+                  className={`${ctaClass('chip')} ${
+                    isSurpriseLoading || isSavingSurprisePlan
+                      ? 'opacity-60 cursor-not-allowed'
+                      : ''
+                  }`}
+                >
+                  Show me something else
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUseSurprisePlan}
+                  disabled={isSavingSurprisePlan || isSurpriseLoading}
+                  className={`${ctaClass('primary')} ${
+                    isSavingSurprisePlan || isSurpriseLoading
+                      ? 'opacity-60 cursor-not-allowed'
+                      : ''
+                  }`}
+                >
+                  {isSavingSurprisePlan ? 'Saving...' : 'Use this plan'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEditSurprisePlan}
+                  disabled={isSavingSurprisePlan || isSurpriseLoading}
+                  className={`${ctaClass('chip')} ${
+                    isSavingSurprisePlan || isSurpriseLoading
+                      ? 'opacity-60 cursor-not-allowed'
+                      : ''
+                  }`}
+                >
+                  Tweak
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClearSurprisePreview}
+                  disabled={isSavingSurprisePlan || isSurpriseLoading}
+                  className={`text-[11px] text-slate-400 hover:text-slate-200 ${
+                    isSavingSurprisePlan || isSurpriseLoading
+                      ? 'opacity-60 cursor-not-allowed'
+                      : ''
+                  }`}
+                >
+                  Dismiss
+                </button>
+              </div>
+              {surpriseSaveError ? (
+                <p className="text-[11px] text-amber-200">{surpriseSaveError}</p>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+
+        {/* Controls */}
+        <section className="space-y-4 rounded-xl border border-slate-800/60 bg-slate-900/40 px-4 py-4">
+          {activePlanId ? (
+            <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-[11px] text-slate-300">
+              {currentPlan?.title?.trim()
+                ? `Adding to “${currentPlan.title.trim()}” (${activePlanId.slice(0, 6)})`
+                : `Adding to your current plan (${activePlanId.slice(0, 6)})`}
+            </div>
+          ) : null}
+          {/* What + Search */}
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-medium text-slate-300" htmlFor="home-what">
+              Search ideas
+            </label>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <input
+                id="home-what"
+                name="q"
+                type="text"
+                placeholder="Search ideas"
+                value={whatInput}
+                onChange={(e) => {
+                  const nextValue = e.target.value;
+                  setWhatInput(nextValue);
+                  if (typeof window !== 'undefined' && nextValue.trim() === '') {
+                    window.localStorage.removeItem(LAST_SEARCH_STORAGE_KEY);
+                    setSlotHint(null);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    triggerSearch();
+                  }
+                }}
+                className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+              />
+
+              <button
+                type="button"
+                onClick={triggerSearch}
+                className="rounded-lg border border-sky-500/70 bg-sky-600/30 px-4 py-2 text-sm font-medium text-sky-50 hover:bg-sky-600/40"
+              >
+                Browse
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSurpriseMe()}
+                disabled={isSurpriseLoading}
+                className={`rounded-lg border border-emerald-500/60 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-50 hover:bg-emerald-500/25 ${
+                  isSurpriseLoading ? 'cursor-not-allowed opacity-60' : ''
+                }`}
+              >
+                {isSurpriseLoading ? 'Surprising...' : 'Surprise me'}
+              </button>
+            </div>
+          </div>
+
+          {/* Where + Mood */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div className="flex-1 flex flex-col gap-2">
+              <label className="text-xs font-medium text-slate-300" htmlFor="home-where">
+                Area
+                <span className="ml-1 text-[10px] font-normal text-slate-500">
+                  (optional)
+                </span>
+              </label>
+              <input
+                id="home-where"
+                name="where"
+                type="text"
+                placeholder="City or neighborhood"
+                value={whereInput}
+                onChange={(e) => setWhereInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    triggerSearch();
+                  }
+                }}
+                className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+              />
+              <button
+                type="button"
+                onClick={requestLocation}
+                className="self-start text-[11px] text-slate-400 hover:text-slate-200"
+                disabled={locationStatus === 'requesting'}
+              >
+                {locationStatus === 'available'
+                  ? 'Using your location'
+                  : locationStatus === 'requesting'
+                  ? 'Requesting location...'
+                  : 'Use my location'}
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-2 sm:w-40">
+              <label className="text-xs font-medium text-slate-300" htmlFor="home-mood">
+                Mood
+              </label>
+              <select
+                id="home-mood"
+                name="mood"
+                value={moodFromUrl}
+                onChange={(e) => {
+                  updateSearchParams({ mood: e.target.value as Mood | 'all' });
+                }}
+                className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+              >
+                {MOOD_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option === 'all'
+                      ? 'All moods'
+                      : option.charAt(0).toUpperCase() + option.slice(1)}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500">Optional vibe filter.</p>
+            </div>
+          </div>
+
+          {slotHint && whatInput.trim() ? (
+            <p className="text-[11px] text-slate-400">
+              Aiming for: <span className="text-slate-200">{slotHint}</span>
+            </p>
+          ) : null}
+          {railPlanId && (slotHint || planIdParam) ? (
+            <div
+              id="return-rail"
+              className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400"
+            >
+              {slotHint ? (
+                <span>
+                  Filling: <span className="text-slate-200">{slotHint}</span>
+                </span>
+              ) : null}
+              <Link
+                href={`/plans/${encodeURIComponent(railPlanId)}`}
+                className={`${ctaClass('chip')} text-[10px]`}
+              >
+                Back to plan ({currentPlanShortId || railShortId})
+              </Link>
+            </div>
+          ) : null}
+          {railPlanId && (slotHint || planIdParam) && addToPlanSuccess ? (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-emerald-200">
+              <span>Added — continue below</span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (typeof window === 'undefined') return;
+                  const continueEl = document.getElementById('continue-section');
+                  continueEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }}
+                className="text-[11px] text-emerald-100 hover:text-emerald-50"
+              >
+                Jump to Continue
+              </button>
+            </div>
+          ) : null}
+
+          <div className="space-y-2">
+            <p className="text-[11px] uppercase tracking-wide text-slate-500">
+              Quick picks
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {DISCOVERY_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => {
+                    const params = new URLSearchParams();
+                    params.set('preset', preset.id);
+                    params.set('from', 'home_quick_picks');
+                    pushCreateWithParams(params);
+                  }}
+                  className={`${ctaClass('chip')} text-[11px]`}
+                  title={preset.hint}
+                  aria-label={preset.hint ? `${preset.label} — ${preset.hint}` : preset.label}
+                >
+                  Start from {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Waypoint view toggle + status + results */}
+        <section className="space-y-2 mt-8">
+          {addToPlanSuccess ? (
+            <div className="sticky top-3 z-20 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-100 flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium text-emerald-200">{addToPlanSuccess}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (typeof window === 'undefined') return;
+                    const continueEl = document.getElementById('continue-section');
+                    continueEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }}
+                  className={`${ctaClass('chip')} text-[10px]`}
+                >
+                  Jump to Continue
+                </button>
+                {currentPlanId ? (
+                  <Link
+                    href={`/plans/${encodeURIComponent(currentPlanId)}`}
+                    className="text-[11px] text-emerald-100 hover:text-white"
+                  >
+                    Back to plan ({currentPlanId.slice(0, 6)})
+                  </Link>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          <div
+            ref={resultsRef}
+            className="flex flex-wrap items-center justify-between gap-2"
+          >
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Ideas
+            </h2>
+            <div className="flex items-center gap-3 text-[11px] text-slate-500">
+              {resultsUpdatedAt ? <span>{resultsUpdatedAt}</span> : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setResultsCleared(true);
+                  setResultsUpdatedAt(null);
+                  setLastResultsSource(null);
+                  setSurpriseStarter(null);
+                  setSurpriseMeta(null);
+                  setSurprisePlan(null);
+                  setSurpriseSaveError(null);
+                  setIsSavingSurprisePlan(false);
+                  setSelectedDiscoveryItem(null);
+                  setAddToPlanError(null);
+                  setAddToPlanSuccess(null);
+                  setError(null);
+                  if (typeof window !== 'undefined') {
+                    window.localStorage.removeItem(LAST_SEARCH_STORAGE_KEY);
+                  }
+                  setSlotHint(null);
+                }}
+                className="text-[11px] text-slate-400 hover:text-slate-200"
+              >
+                Clear results
+              </button>
+            </div>
+          </div>
+          {activePlanId ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-800 bg-slate-900/40 px-3 py-2 text-[11px] text-slate-400">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-slate-500">Current plan:</span>
+                <span className="text-slate-200">{currentPlanLabel}</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    router.push(
+                      withPreservedModeParam(
+                        `/plans/${encodeURIComponent(activePlanId)}`,
+                        searchParams
+                      )
+                    )
+                  }
+                  className="text-[11px] text-slate-300 hover:text-slate-100"
+                >
+                  View
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setActivePlanId(null);
+                }}
+                className="text-[11px] text-slate-500 hover:text-slate-300"
+              >
+                Start fresh
+              </button>
+            </div>
+          ) : null}
+          {lastResultsSource === 'surprise' && hasResults && !showSurprisePlan ? (
+            <div className="rounded-md border border-slate-800 bg-slate-900/50 px-3 py-2 text-[11px] text-slate-400">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                Surprise picks
+              </p>
+              <p className="text-[11px] text-slate-400">Not feeling it? Try again.</p>
+            </div>
+          ) : null}
+          {/* View toggle + status row */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="inline-flex rounded-full border border-slate-700 bg-slate-900/60 p-0.5 text-[11px]">
+              <button
+                type="button"
+                onClick={() => setWaypointView('all')}
+                className={`px-3 py-1 rounded-full ${
+                  waypointView === 'all'
+                    ? 'bg-slate-100 text-slate-900'
+                    : 'text-slate-300 hover:text-slate-100'
+                }`}
+              >
+                All ideas
+              </button>
+              <button
+                type="button"
+                onClick={() => setWaypointView('saved')}
+                className={`px-3 py-1 rounded-full ${
+                  waypointView === 'saved'
+                    ? 'bg-slate-100 text-slate-900'
+                    : 'text-slate-300 hover:text-slate-100'
+                }`}
+              >
+                Saved ideas
+              </button>
+            </div>
+
+            <div className="flex flex-col items-start sm:items-end text-[11px] text-slate-400 gap-0.5">
+              <span>
+                {isLoading
+                  ? 'Loading ideas...'
+                  : error
+                  ? 'Error loading ideas.'
+                  : waypointView === 'all'
+                  ? `${visibleWaypoints.length} matching ideas`
+                  : `${visibleWaypoints.length} saved ideas`}
+              </span>
+              <span>
+                {locationStatus === 'available' && 'Using your location'}
+                {locationStatus === 'requesting' && 'Requesting location'}
+                {locationStatus === 'denied' && 'Location denied (using default area)'}
+              </span>
+            </div>
+          </div>
+
+          {error && !isLoading && (
+            <div className="rounded-xl border border-red-600/60 bg-red-950/40 px-4 py-3 text-xs text-red-200">
+              {error}
+            </div>
+          )}
+
+          {isLoading && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3 text-xs text-slate-400">
+              Loading ideas...
+            </div>
+          )}
+
+          {!isLoading && !error && (
+            <>
+              {!showSurprisePlan ? (
+                <ul className="space-y-3">
+                  {visibleWaypoints.map((item) => {
+                const id = item.source === 'entity' ? item.entity.id : item.saved.id;
+                const name =
+                  item.source === 'entity' ? item.entity.name : item.saved.name;
+                const cost: CostTag | undefined =
+                  item.source === 'entity'
+                    ? item.entity.cost
+                    : (item.saved.cost as CostTag | undefined);
+
+                const proximity: ProximityTag | undefined =
+                  item.source === 'entity'
+                    ? item.entity.proximity
+                    : (item.saved.proximity as ProximityTag | undefined);
+
+                const useCases: UseCaseTag[] | undefined =
+                  item.source === 'entity'
+                    ? item.entity.useCases
+                    : (item.saved.useCases as UseCaseTag[] | undefined);
+
+                const sourceItem = item.source === 'entity' ? item.entity : item.saved;
+                const locationHint = sourceItem.location;
+                const timeLabel =
+                  item.source === 'entity' ? item.entity.timeLabel : undefined;
+                const imageUrl = extractImageUrl(sourceItem);
+                const hasRealImage = Boolean(imageUrl);
+                const fallbackLabel =
+                  (useCases && useCases.length > 0 ? labelUseCase(useCases[0]) : null) ??
+                  'Place';
+                const decisionHint = cost
+                  ? `Price: ${labelCost(cost)}`
+                  : timeLabel
+                  ? `Hours: ${timeLabel}`
+                  : proximity
+                  ? labelProximity(proximity)
+                  : 'Popular nearby';
+                const decisionLine = [locationHint, decisionHint].filter(Boolean).join(' · ');
+
+                const isSaved = savedWaypoints.some((wp) => wp.id === id);
+
+                const onToggleFavorite = () => {
+                  if (item.source === 'entity') {
+                    toggleSavedWaypointForEntity(item.entity);
+                  } else {
+                    toggleSavedWaypointById(id);
+                  }
+                };
+
+                const isSelected = selectedDiscoveryItem
+                  ? selectedDiscoveryItem.source === 'entity'
+                    ? selectedDiscoveryItem.entity.id === id
+                    : selectedDiscoveryItem.saved.id === id
+                  : false;
+
+                return (
+                  <li
+                    key={id}
+                    className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 shadow-sm space-y-2"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
+                        <div className="h-14 w-14 shrink-0 rounded-md border border-slate-800 bg-slate-900/70 overflow-hidden">
+                          {hasRealImage ? (
+                            // eslint-disable-next-line @next/next/no-img-element -- small, dynamic image
+                            <img
+                              src={imageUrl ?? undefined}
+                              alt=""
+                              className="h-full w-full object-cover"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="h-full w-full bg-slate-800/60 flex flex-col items-center justify-center gap-1 text-[10px] text-slate-300">
+                              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-700/70 text-[11px] text-slate-200">
+                                ◇
+                              </span>
+                              <span className="px-1 text-center truncate max-w-[52px] text-[10px] text-slate-300">
+                                {fallbackLabel}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h2 className="text-sm font-medium truncate">{name}</h2>
+                          </div>
+                          {(() => {
+                            const blurbItemCandidate =
+                              item.source === 'entity'
+                                ? item.entity
+                                : item.source === 'saved'
+                                ? item.saved
+                                : item;
+                            const blurb = getResultBlurb(blurbItemCandidate);
+                            const primary =
+                              typeof blurb.primary === 'string' && blurb.primary.trim().length > 0
+                                ? blurb.primary
+                                : 'A place to consider for your plan.';
+                            return (
+                              <p className="text-xs text-slate-400 mt-1 line-clamp-2">
+                                {primary}
+                              </p>
+                            );
+                          })()}
+                          {decisionLine ? (
+                            <p className="text-[11px] text-slate-500">{decisionLine}</p>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-1">
+                        <button
+                          type="button"
+                          onClick={onToggleFavorite}
+                          className="text-[10px] text-slate-500 hover:text-slate-300"
+                          aria-label={isSaved ? 'Remove from saved' : 'Save idea'}
+                        >
+                          {isSaved ? 'Saved' : 'Save'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectDiscoveryItem(item)}
+                        className="text-[11px] text-slate-400 hover:text-slate-200"
+                      >
+                        Preview
+                      </button>
+                    </div>
+                    {isSelected && selectedDiscoveryDetail ? (
+                      <div className="pt-2 border-t border-slate-800/70 space-y-3">
+                        {(() => {
+                          const sourceForDetails =
+                            selectedDiscoveryItem?.source === 'entity'
+                              ? selectedDiscoveryItem.entity
+                              : selectedDiscoveryItem?.saved;
+                          const costValue =
+                            selectedDiscoveryItem?.source === 'entity'
+                              ? selectedDiscoveryItem.entity.cost
+                              : (selectedDiscoveryItem?.saved.cost as CostTag | undefined);
+                          const priceLabel = costValue ? labelCost(costValue) : null;
+                          const fallbackPrimary = 'A place to consider for your plan.';
+                          const blurbItemCandidate =
+                            selectedDiscoveryDetail ??
+                            (selectedDiscoveryItem as DisplayWaypoint | null) ??
+                            sourceForDetails ??
+                            item;
+                          const blurb = getResultBlurb(blurbItemCandidate);
+                          const primary =
+                            typeof blurb.primary === 'string' && blurb.primary.trim().length > 0
+                              ? blurb.primary
+                              : fallbackPrimary;
+                          const secondary =
+                            blurb.secondary &&
+                            (!priceLabel || !blurb.secondary.startsWith('Price:'))
+                              ? blurb.secondary
+                              : undefined;
+                          return (
+                            <>
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="space-y-1">
+                                  <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                                    About this stop
+                                  </p>
+                                  <h3 className="text-lg font-semibold text-slate-100">
+                                    {selectedDiscoveryDetail.title}
+                                  </h3>
+                                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                                    {priceLabel ? (
+                                      <span className="inline-flex items-center rounded-full border border-emerald-500/50 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-100">
+                                        {priceLabel}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedDiscoveryItem(null)}
+                                  className="text-[11px] text-slate-400 hover:text-slate-200"
+                                >
+                                  Close
+                                </button>
+                              </div>
+                              {selectedDiscoveryDetail.locationLine ? (
+                                <p className="text-xs text-slate-500">
+                                  {selectedDiscoveryDetail.locationLine}
+                                </p>
+                              ) : null}
+                              <p className="text-[11px] text-slate-400">
+                                {selectedDiscoveryDetail.decisionHint}
+                              </p>
+                              <div className="space-y-1">
+                                <p className="text-sm text-slate-100">{primary}</p>
+                                {secondary ? (
+                                  <p className="text-xs text-slate-400 mt-1">{secondary}</p>
+                                ) : null}
+                              </div>
+                            </>
+                          );
+                        })()}
+                        {(() => {
+                          const sourceForWebsite =
+                            selectedDiscoveryItem?.source === 'entity'
+                              ? selectedDiscoveryItem.entity
+                              : selectedDiscoveryItem?.saved;
+                          const websiteFromDetail =
+                            extractWebsiteUrl(selectedDiscoveryDetail ?? null) ?? null;
+                          const websiteFromItem =
+                            extractWebsiteUrl(selectedDiscoveryItem) ?? null;
+                          const websiteFromSource = sourceForWebsite
+                            ? extractWebsiteUrl(sourceForWebsite)
+                            : null;
+                          const websiteCandidate =
+                            websiteFromDetail ?? websiteFromItem ?? websiteFromSource ?? null;
+                          const searchQuery = [
+                            selectedDiscoveryDetail.title,
+                            selectedDiscoveryDetail.locationLine,
+                          ]
+                            .filter(Boolean)
+                            .join(' ')
+                            .trim();
+                          const searchUrl = searchQuery
+                            ? `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`
+                            : null;
+                          const canShowAddToCurrent =
+                            Boolean(targetPlanId) && Boolean(selectedDiscoveryItem);
+                          return (
+                            <>
+                              <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                    {selectedDiscoveryDetail.mapsUrl ? (
+                      <a
+                        href={selectedDiscoveryDetail.mapsUrl}
+                        target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[10px] text-slate-300 hover:text-slate-100"
+                                  >
+                                    Open in Maps
+                              </a>
+                            ) : null}
+                            {websiteCandidate ? (
+                              <a
+                                href={websiteCandidate}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[10px] text-slate-300 hover:text-slate-100"
+                              >
+                                Website
+                              </a>
+                            ) : searchUrl ? (
+                              <a
+                                href={searchUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[10px] text-slate-300 hover:text-slate-100"
+                              >
+                                Search web
+                              </a>
+                            ) : null}
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleStartPlanFromItem(
+                                  selectedDiscoveryItem as DisplayWaypoint
+                                )
+                              }
+                              disabled={isAddingToPlan}
+                              className={`${ctaClass('primary')} text-[11px] ${
+                                isAddingToPlan ? 'opacity-60 cursor-not-allowed' : ''
+                              }`}
+                            >
+                              Make this plan
+                            </button>
+                            {canShowAddToCurrent ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleAddToCurrentPlan(
+                                    selectedDiscoveryItem as DisplayWaypoint,
+                                    targetPlanId as string
+                                  )
+                                }
+                                disabled={isAddingToPlan}
+                                className={`${ctaClass('primary')} text-[11px] ${
+                                  isAddingToPlan ? 'opacity-60 cursor-not-allowed' : ''
+                                }`}
+                              >
+                                {slotHint && currentPlanId
+                                  ? `Add to ${slotHint} (${currentPlanShortId || currentPlanId.slice(0, 6)})`
+                                  : currentPlanId
+                                  ? `Add to current plan${
+                                      currentPlanShortId ? ` (${currentPlanShortId})` : ''
+                                    }`
+                                  : ''}
+                              </button>
+                            ) : null}
+                          </div>
+                        </>
+                      );
+                    })()}
+                    {addToPlanSuccess ? (
+                      <p className="text-[11px] text-emerald-200">{addToPlanSuccess}</p>
+                    ) : null}
+                        {addToPlanError ? (
+                          <p className="text-[11px] text-amber-200">{addToPlanError}</p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </li>
+                );
+              })}
+
+                {visibleWaypoints.length === 0 && (
+                  <li className="rounded-xl border border-dashed border-slate-800 bg-slate-900/40 px-4 py-6 text-center text-xs text-slate-500">
+                    {waypointView === 'saved'
+                      ? 'No saved ideas yet.'
+                      : 'No matches yet.'}
+                  </li>
+                )}
+                </ul>
+              ) : null}
+            </>
+          )}
+        </section>
+            </div>
+          )}
         </section>
 
         {TEMPLATES_ENABLED ? (
@@ -1598,27 +4005,22 @@ export default function HomePageClient() {
             className="space-y-3 pt-6 mt-6 border-t border-slate-900/60"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold text-slate-200">Templates</h2>
+              <h2 className="text-sm font-semibold text-slate-200">Template library</h2>
               <button
                 type="button"
                 onClick={() => setShowTemplateExplorer((prev) => !prev)}
                 className={`${ctaClass('chip')} text-[11px]`}
               >
-                {showTemplateExplorer ? 'Hide templates' : 'Start with a template'}
+                {showTemplateExplorer ? 'Hide templates' : 'Browse templates'}
               </button>
             </div>
-            <p className="text-xs text-slate-400">
-              Templates are reusable starting points. Pick one to open it in the editor and customize it.
-            </p>
             <p className="text-[11px] text-slate-500">
-              You're building your own plan. Templates just get you started.
+              Remix a starter plan from the library.
             </p>
             {templateLoading ? (
               <p className="text-xs text-slate-400">Loading templates...</p>
             ) : templatePlans.length === 0 ? (
-              <p className="text-xs text-slate-400">
-                No templates yet. Convert a plan to a template to reuse it later.
-              </p>
+              <p className="text-xs text-slate-400">No templates yet.</p>
             ) : showTemplateExplorer ? (
               <div className="space-y-4">
                 <div className="space-y-2">
@@ -1641,7 +4043,7 @@ export default function HomePageClient() {
                   </div>
                   {activeTemplatePack ? (
                     <p className="text-[11px] text-slate-500">
-                      {activeTemplatePack.description || 'Pick a template to start a new plan.'}
+                      {activeTemplatePack.description || 'Choose a template to make your own.'}
                     </p>
                   ) : null}
                 </div>
@@ -1688,16 +4090,16 @@ export default function HomePageClient() {
                             <button
                               type="button"
                               onClick={() => handleOpenTemplatePreview(template)}
-                              className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                              className="text-[10px] text-slate-400 hover:text-slate-100 underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-slate-200"
                             >
                               Preview
                             </button>
                             <button
                               type="button"
                               onClick={() => handleUseTemplate(template)}
-                              className={`${ctaClass('chip')} shrink-0 text-[10px]`}
+                              className={`${ctaClass('primary')} shrink-0 text-[10px]`}
                             >
-                              Use template
+                              Make this plan
                             </button>
                             <button
                               type="button"
@@ -1723,248 +4125,11 @@ export default function HomePageClient() {
               </div>
             ) : (
               <p className="text-xs text-slate-400">
-                Start with a template to explore packs and reuse plans.
+                Browse template packs to remix a plan.
               </p>
             )}
           </section>
         ) : null}
-
-        <section className="space-y-3 pt-6 mt-6 border-t border-slate-900/60">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Continue
-          </h2>
-          {/* Plans (recent + saved toggle) */}
-          <section className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">{waypointHeaderLabel}</h3>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500">View:</span>
-                <button
-                  type="button"
-                  onClick={() => setRecentShowSavedOnly(false)}
-                  className={`text-[11px] rounded-full px-3 py-1 border ${
-                    recentShowSavedOnly
-                      ? 'border-slate-700 text-slate-400 hover:text-slate-200'
-                      : 'border-slate-100 bg-slate-100 text-slate-900'
-                  }`}
-                >
-                  All
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentShowSavedOnly(true)}
-                  className={`text-[11px] rounded-full px-3 py-1 border ${
-                    recentShowSavedOnly
-                      ? 'border-slate-100 bg-slate-100 text-slate-900'
-                      : 'border-slate-700 text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Saved
-                </button>
-              </div>
-            </div>
-            {migrationMessage ? (
-              <div className="rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-2 text-[11px] text-emerald-100">
-                {migrationMessage}
-              </div>
-            ) : null}
-            {userId && supabaseLoading ? (
-              <p className="text-xs text-slate-400">Loading your Waypoints...</p>
-            ) : recentV2Plans.length === 0 ? (
-              <p className="text-xs text-slate-400">
-                No Waypoints yet. Try searching, then plan or share a result to populate this list.
-              </p>
-            ) : (
-              <ul className="space-y-2">
-                {recentV2Plans.map((plan) => (
-                  <li
-                    key={plan.id}
-                    className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div className="space-y-0.5 min-w-0 w-full">
-                      <p className="font-medium text-slate-100 truncate" title={plan.title}>
-                        {plan.title}
-                      </p>
-                      <div className="flex items-center gap-2 text-[11px] text-slate-400 truncate" title={new Date(plan.updatedAt).toLocaleString()}>
-                        <span>Updated {new Date(plan.updatedAt).toLocaleString()}</span>
-                        {plan.isShared ? (
-                          <span className="inline-flex items-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
-                            Shared
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5 justify-start sm:justify-end w-full sm:w-auto">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!plan.encoded) return;
-                          router.push(
-                            withPreservedModeParam(
-                              `/plans/${encodeURIComponent(plan.id)}`,
-                              searchParams
-                            )
-                          );
-                        }}
-                        className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                      >
-                        Open
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!plan.encoded) return;
-                          try {
-                            deserializePlan(plan.encoded);
-                            const origin = withPreservedModeParam(
-                              `/plan?p=${encodeURIComponent(plan.encoded)}`,
-                              searchParams
-                            );
-                            router.push(
-                              withPreservedModeParam(
-                                `/create?from=${encodeURIComponent(plan.encoded)}&origin=${encodeURIComponent(origin)}`,
-                                searchParams
-                              )
-                            );
-                          } catch {
-                            // ignore invalid payload
-                          }
-                        }}
-                        className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                      >
-                        Edit
-                      </button>
-                      {SHARE_ENABLED ? (
-                        <button
-                          type="button"
-                          onClick={() => handleShareRecentV2Plan(plan)}
-                          className={`${ctaClass('chip')} shrink-0 text-[10px]`}
-                        >
-                          Share this version
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveRecentV2(plan.id)}
-                        className={`${ctaClass('danger')} shrink-0 text-[10px] ms-2`}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          {/* Recent plans */}
-          {recentPlans.length > 0 && (
-            <div className="space-y-2 pt-3 border-t border-slate-900/50">
-              <div className="flex items-center justify-between text-[11px] text-slate-400">
-                <span>Earlier plans</span>
-                <button
-                  type="button"
-                  onClick={handleClearAllPlans}
-                  className="text-[10px] font-medium text-slate-500 hover:text-slate-300"
-                >
-                  Clear all
-                </button>
-              </div>
-
-              <ul className="space-y-2">
-                {recentPlans.map((plan) => (
-                  <li
-                    key={plan.id}
-                    className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs flex items-center justify-between gap-3"
-                  >
-                    <div className="space-y-0.5 min-w-0">
-                      <p className="font-medium text-slate-100 truncate">{plan.title}</p>
-                      <p className="text-[11px] text-slate-400 truncate">
-                        {plan.location ?? 'No location'} A{' '}
-                        {plan.dateTime
-                          ? new Date(plan.dateTime).toLocaleString(undefined, {
-                              month: 'short',
-                              day: 'numeric',
-                              hour: 'numeric',
-                              minute: '2-digit',
-                              hour12: true,
-                            })
-                          : 'No time set'}
-                      </p>
-                      {plan.chosen || plan.completed === true || plan.sentiment ? (
-                        <div className="flex flex-wrap gap-1 text-[10px] text-slate-500">
-                          {plan.chosen ? (
-                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
-                              Chosen
-                            </span>
-                          ) : null}
-                          {plan.completed === true ? (
-                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
-                              Completed
-                            </span>
-                          ) : null}
-                          {plan.sentiment ? (
-                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 capitalize">
-                              {plan.sentiment}
-                            </span>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="flex flex-wrap gap-1.5 justify-end">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenPlanCalendar(plan)}
-                        className="shrink-0 rounded-md border border-emerald-500/70 bg-emerald-600/20 px-2 py-1 text-[10px] font-semibold text-emerald-50 hover:bg-emerald-600/30"
-                      >
-                        Calendar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenPlanMaps(plan)}
-                        className="shrink-0 rounded-md border border-sky-500/70 bg-sky-600/20 px-2 py-1 text-[10px] font-semibold text-sky-50 hover:bg-sky-600/30"
-                      >
-                        Maps
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleEditPlan(plan)}
-                        className="shrink-0 rounded-md border border-amber-500/70 bg-amber-600/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-600/30"
-                      >
-                        Edit
-                      </button>
-                      {SHARE_ENABLED ? (
-                        <button
-                          type="button"
-                          onClick={() => handleViewDetails(plan)}
-                          className="shrink-0 rounded-md border border-indigo-500/70 bg-indigo-600/20 px-2 py-1 text-[10px] font-semibold text-indigo-50 hover:bg-indigo-600/30"
-                        >
-                          Details
-                        </button>
-                      ) : null}
-                      {SHARE_ENABLED ? (
-                        <button
-                          type="button"
-                          onClick={() => handleSharePlan(plan)}
-                          className="shrink-0 rounded-md border border-fuchsia-500/70 bg-fuchsia-600/20 px-2 py-1 text-[10px] font-semibold text-fuchsia-50 hover:bg-fuchsia-600/30"
-                        >
-                          Share this version
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => handleRemovePlan(plan.id)}
-                        className="shrink-0 rounded-md border border-rose-600/70 bg-rose-700/25 px-2 py-1 text-[10px] font-semibold text-rose-50 hover:bg-rose-700/35 ms-2"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </section>
 
         {selectedTemplate ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4">
@@ -2056,341 +4221,6 @@ export default function HomePageClient() {
           </div>
         ) : null}
 
-        {/* Controls */}
-        <section className="space-y-3">
-          {/* What + Search */}
-          <div className="flex flex-col gap-2">
-            <label className="text-xs font-medium text-slate-300" htmlFor="home-what">
-              What are you looking for?
-            </label>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <input
-                id="home-what"
-                name="q"
-                type="text"
-                placeholder="e.g. cheap date, cozy bar, birthday dinner, friends night"
-                value={whatInput}
-                onChange={(e) => {
-                  setWhatInput(e.target.value);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    triggerSearch();
-                  }
-                }}
-                className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
-              />
-
-              <button
-                type="button"
-                onClick={triggerSearch}
-                className="rounded-lg border border-sky-500/70 bg-sky-600/30 px-4 py-2 text-sm font-medium text-sky-50 hover:bg-sky-600/40"
-              >
-                Search
-              </button>
-            </div>
-          </div>
-
-          {/* Where + Mood */}
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div className="flex-1 flex flex-col gap-2">
-              <label className="text-xs font-medium text-slate-300" htmlFor="home-where">
-                Where?
-                <span className="ml-1 text-[10px] font-normal text-slate-500">
-                  (optional  city, neighborhood, state)
-                </span>
-              </label>
-              <input
-                id="home-where"
-                name="where"
-                type="text"
-                placeholder="e.g. near me, San Jose, downtown"
-                value={whereInput}
-                onChange={(e) => setWhereInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    triggerSearch();
-                  }
-                }}
-                className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
-              />
-              <button
-                type="button"
-                onClick={requestLocation}
-                className="self-start text-[11px] text-slate-400 hover:text-slate-200"
-                disabled={locationStatus === 'requesting'}
-              >
-                {locationStatus === 'available'
-                  ? 'Using your location'
-                  : locationStatus === 'requesting'
-                  ? 'Requesting location...'
-                  : 'Use my location'}
-              </button>
-            </div>
-
-            <div className="flex flex-col gap-2 sm:w-40">
-              <label className="text-xs font-medium text-slate-300" htmlFor="home-mood">
-                Mood
-              </label>
-              <select
-                id="home-mood"
-                name="mood"
-                value={moodFromUrl}
-                onChange={(e) => {
-                  updateSearchParams({ mood: e.target.value as Mood | 'all' });
-                }}
-                className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
-              >
-                {MOOD_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option === 'all'
-                      ? 'All moods'
-                      : option.charAt(0).toUpperCase() + option.slice(1)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          {/* Helper hint about natural-language search */}
-          <p className="text-[11px] text-slate-500">
-            Search currently looks across starting points and your saved Waypoints (places coming soon). Use natural phrases like{' '}
-            <span className="font-medium text-slate-300">
-              &ldquo;cheap date&rdquo;, &ldquo;cozy bar in downtown&rdquo;, or &ldquo;birthday dinner&rdquo;
-            </span>{' '}
-            to match vibes and tags - even with small typos.
-          </p>
-        </section>
-
-        {/* Waypoint view toggle + status + results */}
-        <section className="space-y-2 mt-6">
-          {/* View toggle + status row */}
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="inline-flex rounded-full border border-slate-700 bg-slate-900/60 p-0.5 text-[11px]">
-              <button
-                type="button"
-                onClick={() => setWaypointView('all')}
-                className={`px-3 py-1 rounded-full ${
-                  waypointView === 'all'
-                    ? 'bg-slate-100 text-slate-900'
-                    : 'text-slate-300 hover:text-slate-100'
-                }`}
-              >
-                All waypoints
-              </button>
-              <button
-                type="button"
-                onClick={() => setWaypointView('saved')}
-                className={`px-3 py-1 rounded-full ${
-                  waypointView === 'saved'
-                    ? 'bg-slate-100 text-slate-900'
-                    : 'text-slate-300 hover:text-slate-100'
-                }`}
-              >
-                Saved
-              </button>
-            </div>
-
-            <div className="flex flex-col items-start sm:items-end text-[11px] text-slate-400 gap-0.5">
-              <span>
-                {isLoading
-                  ? 'Loading waypoints...'
-                  : error
-                  ? 'Error loading waypoints.'
-                  : waypointView === 'all'
-                  ? `${displayWaypoints.length} matching waypoint(s)`
-                  : `${displayWaypoints.length} saved waypoint(s)`}
-              </span>
-              <span>
-                {locationStatus === 'available' && 'Using your location'}
-                {locationStatus === 'requesting' && 'Requesting location'}
-                {locationStatus === 'denied' && 'Location denied (using default area)'}
-              </span>
-
-              {/* Active filters summary */}
-              {(queryFromUrl || moodFromUrl !== 'all') && (
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {queryFromUrl && (
-                    <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[10px] text-slate-300">
-                      Query: {queryFromUrl}
-                    </span>
-                  )}
-                  {moodFromUrl !== 'all' && (
-                    <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[10px] text-slate-300 capitalize">
-                      Mood: {moodFromUrl}
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {error && !isLoading && (
-            <div className="rounded-xl border border-red-600/60 bg-red-950/40 px-4 py-3 text-xs text-red-200">
-              {error}
-            </div>
-          )}
-
-          {isLoading && (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3 text-xs text-slate-400">
-              Loading waypoints...
-            </div>
-          )}
-
-          {!isLoading && !error && (
-            <ul className="space-y-3">
-              {displayWaypoints.map((item) => {
-                const id = item.source === 'entity' ? item.entity.id : item.saved.id;
-                const name =
-                  item.source === 'entity' ? item.entity.name : item.saved.name;
-                const description =
-                  item.source === 'entity'
-                    ? item.entity.description
-                    : item.saved.description;
-                const tags =
-                  item.source === 'entity' ? item.entity.tags : undefined;
-                const mood: Mood =
-                  item.source === 'entity'
-                    ? item.entity.mood
-                    : (item.saved.mood ?? 'chill');
-
-                const cost: CostTag | undefined =
-                  item.source === 'entity'
-                    ? item.entity.cost
-                    : (item.saved.cost as CostTag | undefined);
-
-                const proximity: ProximityTag | undefined =
-                  item.source === 'entity'
-                    ? item.entity.proximity
-                    : (item.saved.proximity as ProximityTag | undefined);
-
-                const useCases: UseCaseTag[] | undefined =
-                  item.source === 'entity'
-                    ? item.entity.useCases
-                    : (item.saved.useCases as UseCaseTag[] | undefined);
-
-                const isSaved = savedWaypoints.some((wp) => wp.id === id);
-                const origin = item.source === 'saved' ? deriveOrigin(item.saved) : null;
-                const originLine = origin
-                  ? origin.originType === 'District'
-                    ? `${origin.primaryLabel} · ${origin.secondaryLabel ?? ''}`.trim()
-                    : origin.originType === 'City'
-                    ? origin.primaryLabel
-                    : origin.originType === 'Template'
-                    ? `Template · ${origin.primaryLabel}`
-                    : `Search · "${origin.primaryLabel}"`
-                  : null;
-                const discoverySignal = buildDiscoverySignal({
-                  query: queryFromUrl,
-                  moodFilter: moodFromUrl,
-                  name,
-                  description,
-                  location: item.source === 'entity' ? item.entity.location : item.saved.location,
-                  tags,
-                  entityMood: mood,
-                  isSaved,
-                });
-
-                const onToggleFavorite = () => {
-                  if (item.source === 'entity') {
-                    toggleSavedWaypointForEntity(item.entity);
-                  } else {
-                    toggleSavedWaypointById(id);
-                  }
-                };
-
-                const hasAnyChip =
-                  !!cost || !!proximity || (useCases && useCases.length > 0);
-
-                return (
-                  <li
-                    key={id}
-                    className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 shadow-sm space-y-2"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h2 className="text-sm font-medium">{name}</h2>
-                          {origin ? (
-                            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[10px] text-slate-300">
-                              {origin.originType}
-                            </span>
-                          ) : null}
-                        </div>
-                        {originLine ? (
-                          <p className="text-[11px] text-slate-500 truncate">{originLine}</p>
-                        ) : null}
-                        {description && (
-                          <p className="text-xs text-slate-400">{description}</p>
-                        )}
-                        {discoverySignal && (
-                          <p className="text-[11px] text-slate-500">{discoverySignal}</p>
-                        )}
-
-                        {/* Chips row */}
-                        {hasAnyChip && (
-                          <div className="mt-1 flex flex-wrap gap-1.5">
-                            {cost && (
-                              <span className="inline-flex items-center rounded-full border border-emerald-500/50 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-100">
-                                {labelCost(cost)}
-                              </span>
-                            )}
-                            {proximity && (
-                              <span className="inline-flex items-center rounded-full border border-sky-500/50 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-100">
-                                {labelProximity(proximity)}
-                              </span>
-                            )}
-                            {useCases &&
-                              useCases.map((u) => (
-                                <span
-                                  key={u}
-                                  className="inline-flex items-center rounded-full border border-purple-500/50 bg-purple-500/10 px-2 py-0.5 text-[10px] text-purple-100"
-                                >
-                                  {labelUseCase(u)}
-                                </span>
-                              ))}
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex flex-col items-end gap-1">
-                        <span className="inline-flex items-center rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-300">
-                          {mood}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={onToggleFavorite}
-                          className="text-[10px] text-slate-500 hover:text-slate-300"
-                          aria-label={isSaved ? 'Remove from saved' : 'Save waypoint'}
-                        >
-                          {isSaved ? 'Saved' : 'Save'}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-end gap-2">
-                      {origin?.originHref ? (
-                        <Link
-                          href={origin.originHref}
-                          className={`${ctaClass('chip')} text-[11px]`}
-                        >
-                          Explore
-                        </Link>
-                      ) : null}
-                    </div>
-                  </li>
-                );
-              })}
-
-              {displayWaypoints.length === 0 && (
-                <li className="rounded-xl border border-dashed border-slate-800 bg-slate-900/40 px-4 py-6 text-center text-xs text-slate-500">
-                  {waypointView === 'saved'
-                    ? 'No saved waypoints yet. Save a place from search to keep it handy.'
-                    : 'No matches yet. Try a new query or clear filters to see new ideas.'}
-                </li>
-              )}
-            </ul>
-          )}
-        </section>
       </div>
     </main>
   );

@@ -96,8 +96,8 @@ export default function DistrictView({ district, city }: Props) {
   }, [currentHref, district.id, district.name, districtContext]);
 
   const primaryCtaLabel = isEntryReadOnly
-    ? 'Open editor (Plan mode)'
-    : 'Build a plan in this district';
+    ? 'Open plan editor (Plan mode)'
+    : 'Start planning in this district';
 
   const handlePrimaryClick = () => {
     if (
@@ -140,6 +140,7 @@ export default function DistrictView({ district, city }: Props) {
               Back to City
             </Link>
           </div>
+          <p className="text-[11px] text-slate-500">This opens the plan editor.</p>
         </header>
 
         <section className="space-y-3">

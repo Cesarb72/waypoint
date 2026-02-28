@@ -5,12 +5,8 @@ import type { Plan } from '../plan-engine';
 export type CloudPlanRow = {
   id: string;
   owner_id: string;
-  title: string;
-  plan?: Plan;
+  share_token?: string | null;
   plan_json?: Plan;
-  origin_json?: Plan['origin'] | Plan['meta'] | null;
-  presentation_json?: Plan['presentation'] | null;
-  parent_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -23,6 +19,7 @@ type CloudPlanSummary = {
 
 type Ok<T> = { ok: true } & T;
 type Err = { ok: false; error: string };
+type OkEmpty = { ok: true };
 
 function normalizeError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -30,41 +27,36 @@ function normalizeError(error: unknown): string {
   return 'Unknown error';
 }
 
-const CLOUD_PLAN_JSON_COLUMN = CLOUD_PLANS_TABLE === 'waypoints' ? 'plan' : 'plan_json';
+const CLOUD_PLAN_JSON_COLUMN = 'plan_json';
+export const CLOUD_PLAN_SELECT_MIN =
+  'id,owner_id,plan_json,share_token,created_at,updated_at';
 
 function buildCloudRow(
   plan: Plan,
-  userId: string,
-  parentId?: string | null
+  userId: string
 ): Omit<CloudPlanRow, 'created_at' | 'updated_at'> {
   const payload: Omit<CloudPlanRow, 'created_at' | 'updated_at'> = {
     id: plan.id,
     owner_id: userId,
-    title: plan.title || 'Waypoint',
+    share_token: plan.presentation?.shareToken ?? null,
   };
   (payload as Record<string, unknown>)[CLOUD_PLAN_JSON_COLUMN] = plan;
-  if (CLOUD_PLANS_TABLE === 'plans') {
-    payload.origin_json = plan.meta?.origin ?? plan.origin ?? null;
-    payload.presentation_json = plan.presentation ?? null;
-  }
-  if (CLOUD_PLANS_TABLE === 'waypoints' && parentId !== undefined) {
-    payload.parent_id = parentId;
-  }
   return payload;
 }
 
 export async function upsertCloudPlan(
   plan: Plan,
   userId: string,
-  options?: { parentId?: string | null }
-): Promise<Ok<{}> | Err> {
+  _options?: { parentId?: string | null }
+): Promise<OkEmpty | Err> {
   try {
+    void _options;
     const supabase = getSupabaseBrowserClient();
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
     if (sessionError || !sessionData.session?.user) {
       return { ok: false, error: 'No active session.' };
     }
-    const payload = buildCloudRow(plan, userId, options?.parentId);
+    const payload = buildCloudRow(plan, userId);
     const { error } = await supabase.from(CLOUD_PLANS_TABLE).upsert(payload, { onConflict: 'id' });
     if (error) return { ok: false, error: error.message };
     return { ok: true };
@@ -78,11 +70,11 @@ export async function fetchCloudPlan(
   _userId: string
 ): Promise<Ok<{ plan: Plan; ownerId?: string }> | Err> {
   try {
+    void _userId;
     const supabase = getSupabaseBrowserClient();
-    const selectColumns = `id,owner_id,${CLOUD_PLAN_JSON_COLUMN}`;
     const { data, error } = await supabase
       .from(CLOUD_PLANS_TABLE)
-      .select(selectColumns)
+      .select(CLOUD_PLAN_SELECT_MIN)
       .eq('id', planId)
       .limit(1);
     if (error) return { ok: false, error: error.message };
@@ -90,7 +82,18 @@ export async function fetchCloudPlan(
     const planJson = row?.[CLOUD_PLAN_JSON_COLUMN] as Plan | undefined;
     if (!planJson) return { ok: false, error: 'Plan not found.' };
     const ownerId = typeof row?.owner_id === 'string' ? row.owner_id : undefined;
-    return { ok: true, plan: planJson, ownerId };
+    const nextPlan: Plan = {
+      ...planJson,
+      owner: planJson.owner ?? (ownerId ? { type: 'user', id: ownerId } : undefined),
+      presentation: {
+        ...planJson.presentation,
+        shareToken:
+          planJson.presentation?.shareToken ??
+          (row?.share_token as string | null) ??
+          undefined,
+      },
+    };
+    return { ok: true, plan: nextPlan, ownerId };
   } catch (error) {
     return { ok: false, error: normalizeError(error) };
   }
@@ -103,13 +106,13 @@ export async function listCloudPlans(
     const supabase = getSupabaseBrowserClient();
     const { data, error } = await supabase
       .from(CLOUD_PLANS_TABLE)
-      .select('id,title,updated_at')
+      .select('id,plan_json,updated_at')
       .eq('owner_id', userId)
       .order('updated_at', { ascending: false });
     if (error) return { ok: false, error: error.message };
     const plans = (data ?? []).map((row) => ({
       id: row.id as string,
-      title: (row.title as string) || 'Waypoint',
+      title: ((row.plan_json as Plan | undefined)?.title as string) || 'Waypoint',
       updatedAt: Date.parse(row.updated_at as string) || 0,
     }));
     return { ok: true, plans };

@@ -1,10 +1,15 @@
 import { Suspense } from 'react';
-import PlanPageClient from '../../plan/PlanPageClient';
+import PlanWorkspaceClient from '../PlanWorkspaceClient';
 
-export default function PlanByIdPage() {
+type PageProps = {
+  params: Promise<{ planId: string }>;
+};
+
+export default async function PlanByIdPage({ params }: PageProps) {
+  const resolved = await params;
   return (
     <Suspense fallback={null}>
-      <PlanPageClient />
+      <PlanWorkspaceClient planId={resolved.planId} mode="existing" />
     </Suspense>
   );
 }

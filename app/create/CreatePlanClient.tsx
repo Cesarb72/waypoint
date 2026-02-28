@@ -31,6 +31,8 @@ import type { Origin } from '../plan-engine/origin';
 import { loadDiscoverySession, markDiscoveryRestore } from '@/lib/discoveryStorage';
 import { clearDraftByKey, loadDraftByKey, saveDraftByKey } from '@/lib/draftStorage';
 import { ACCENT_OPTIONS } from '../utils/branding';
+import { getTemplateSeedById } from '@/lib/templateSeeds';
+import { createPlanFromTemplateSeed } from '@/lib/templatePlan';
 import { useSession } from '../auth/SessionProvider';
 import { useEntryMode } from '../context/EntryModeContext';
 import { withPreservedMode } from '../lib/entryMode';
@@ -38,6 +40,29 @@ import { fetchCloudDraft, upsertCloudDraft, clearCloudDraft } from '../lib/cloud
 import { fetchCloudPlan, upsertCloudPlan } from '../lib/cloudPlans';
 import { CLOUD_PLANS_TABLE } from '../lib/cloudTables';
 import { getMyRole, type PlanMemberRole } from '../lib/planMembers';
+import { logEvent } from '../lib/planEvents';
+import {
+  DEFAULT_TEMPLATE_V2_ID,
+  TEMPLATES_V2,
+  getTemplateV2ById,
+  type TemplateV2,
+} from '../lib/templatesV2';
+import { resolvePlanTemplate } from '../lib/verticals/resolvePlanTemplate';
+import { buildVerticalGuidance } from '../lib/verticals/guidance/buildVerticalGuidance';
+import { setPlanTemplateId } from '../lib/verticals/resolvePlanTemplate';
+import { VerticalIdentityHeader } from '../components/VerticalIdentityHeader';
+import { resolveStopTypeLabel, StopTypeBadge } from '../components/StopTypeBadge';
+import {
+  getExperiencePackSummary,
+  type ExperiencePackSummary,
+} from '../lib/packs/experiencePackQueries';
+import {
+  buildExperiencePackDraft,
+  buildPreviewExperiencePackDraft,
+  type ExperiencePackDraft,
+} from '../lib/packs/experiencePackDraft';
+import { extractCity } from '../lib/geo/extractCity';
+import { extractDistrict } from '../lib/geo/extractDistrict';
 
 type Props = {
   fromEncoded?: string;
@@ -79,6 +104,107 @@ function decodeParam(value: string): string {
     return decodeURIComponent(value);
   } catch {
     return value;
+  }
+}
+
+function normalizePresetKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
+}
+
+function mapPresetToVerticalTemplateId(input: { id?: string; name?: string }): string | undefined {
+  const normalizedId = input.id ? normalizePresetKey(input.id) : '';
+  const normalizedName = input.name ? normalizePresetKey(input.name) : '';
+
+  const exactAliases: Record<string, string> = {
+    date_night: 'idea-date',
+    datenight: 'idea-date',
+    romantic: 'idea-date',
+    romance: 'idea-date',
+    night_out: 'idea-date',
+    nightout: 'idea-date',
+    quick_hang: 'idea-date',
+    quickhang: 'idea-date',
+    family_friendly: 'idea-date',
+    familyfriendly: 'idea-date',
+    family: 'idea-date',
+    cozy: 'idea-date',
+    dinner: 'idea-date',
+    adventure: 'tourism-dmo',
+    outdoors: 'tourism-dmo',
+    explore: 'tourism-dmo',
+    day_trip: 'tourism-dmo',
+    daytrip: 'tourism-dmo',
+  };
+
+  if (normalizedId && exactAliases[normalizedId]) return exactAliases[normalizedId];
+  if (normalizedName && exactAliases[normalizedName]) return exactAliases[normalizedName];
+
+  const containsIdeaDate = (value: string) =>
+    value.includes('date') && value.includes('night');
+  const containsTourism = (value: string) =>
+    value.includes('adventure') ||
+    value.includes('outdoor') ||
+    value.includes('outdoors') ||
+    value.includes('explore') ||
+    value.includes('daytrip');
+
+  if (normalizedId && containsIdeaDate(normalizedId)) return 'idea-date';
+  if (normalizedName && containsIdeaDate(normalizedName)) return 'idea-date';
+  if (normalizedId && containsTourism(normalizedId)) return 'tourism-dmo';
+  if (normalizedName && containsTourism(normalizedName)) return 'tourism-dmo';
+
+  return undefined;
+}
+
+function applyVerticalFromPreset<T extends Plan>(
+  presetIdOrName: string | null | undefined,
+  draft: T
+): T {
+  if (!presetIdOrName) return draft;
+  const presetNormalized = normalizePresetKey(presetIdOrName);
+  const mappedId = mapPresetToVerticalTemplateId({ id: presetIdOrName, name: presetIdOrName });
+  if (!mappedId) return draft;
+  const nextPlan = setPlanTemplateId(draft, mappedId);
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[verticalPreset]', {
+      presetRaw: presetIdOrName,
+      presetNormalized,
+      mappedVerticalId: mappedId,
+      resultingTemplateId: nextPlan.template_id ?? null,
+    });
+  }
+  return nextPlan;
+}
+
+function applyVerticalFromPresetPair<T extends Plan>(
+  presetId: string | null | undefined,
+  presetName: string | null | undefined,
+  draft: T
+): T {
+  const mappedId = mapPresetToVerticalTemplateId({ id: presetId ?? undefined, name: presetName ?? undefined });
+  if (!mappedId) return draft;
+  const nextPlan = setPlanTemplateId(draft, mappedId);
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[verticalPreset]', {
+      presetRaw: presetId ?? presetName ?? null,
+      presetNormalized: normalizePresetKey(presetId ?? presetName ?? ''),
+      mappedVerticalId: mappedId,
+      resultingTemplateId: nextPlan.template_id ?? null,
+    });
+  }
+  return nextPlan;
+}
+
+function resolveEncodedPlanParam(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    deserializePlan(value);
+    return value;
+  } catch {
+    return null;
   }
 }
 
@@ -178,6 +304,44 @@ function buildOriginFromContext(context: {
   return null;
 }
 
+function getHourBinFromTimeInput(timeRaw?: string | null): string | null {
+  const value = (timeRaw ?? '').trim();
+  if (!value) return null;
+  const hourRaw = value.split(':')[0];
+  const hour = Number.parseInt(hourRaw ?? '', 10);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (hour < 6) return '0-6';
+  if (hour < 9) return '6-9';
+  if (hour < 12) return '9-12';
+  if (hour < 15) return '12-15';
+  if (hour < 18) return '15-18';
+  if (hour < 21) return '18-21';
+  return '21-24';
+}
+
+function getDayOfWeekFromDateInput(dateRaw?: string | null): number | null {
+  const value = (dateRaw ?? '').trim();
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const year = Number.parseInt(match[1] ?? '', 10);
+  const month = Number.parseInt(match[2] ?? '', 10);
+  const day = Number.parseInt(match[3] ?? '', 10);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+  const parsed = new Date(year, month - 1, day);
+  if (
+    Number.isNaN(parsed.valueOf()) ||
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+  return parsed.getDay();
+}
+
 export default function CreatePlanClient({
   fromEncoded,
   sourceTitle,
@@ -191,7 +355,17 @@ export default function CreatePlanClient({
   const { user } = useSession();
   const { isReadOnly: isEntryReadOnly, mode: entryMode } = useEntryMode();
   const userId = user?.id ?? null;
-  const fromParam = searchParams.get('from');
+  const fromParamRaw = searchParams.get('from');
+  const fromEncodedParam = searchParams.get('fromEncoded');
+  const presetParam = searchParams.get('preset');
+  const seedParam = searchParams.get('seed');
+  const fromPayloadParam = fromEncodedParam ?? fromParamRaw;
+  const fromParam = useMemo(() => resolveEncodedPlanParam(fromPayloadParam), [fromPayloadParam]);
+  const fromContextParam = useMemo(() => {
+    if (fromEncodedParam) return fromParamRaw ?? null;
+    if (fromParam) return null;
+    return fromParamRaw ?? null;
+  }, [fromEncodedParam, fromParam, fromParamRaw]);
   const originSourceParam = searchParams.get('originSource');
   const planIdParam = searchParams.get('planId');
   const editTemplateParam = searchParams.get('editTemplate');
@@ -209,6 +383,7 @@ export default function CreatePlanClient({
       audience: 'me-and-friends',
     })
   );
+  const [selectedTemplateId, setSelectedTemplateId] = useState(DEFAULT_TEMPLATE_V2_ID);
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied'>('idle');
   const [hasShared, setHasShared] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
@@ -218,6 +393,8 @@ export default function CreatePlanClient({
   const [origin, setOrigin] = useState<Origin | null>(() => loadOrigin());
   const [sourceExistsInSupabase, setSourceExistsInSupabase] = useState(false);
   const [sourceOwnedByUser, setSourceOwnedByUser] = useState(false);
+  void isSaved;
+  void sourceOwnedByUser;
   const [showCopyNotice, setShowCopyNotice] = useState(false);
   const [planHydratedFromSource, setPlanHydratedFromSource] = useState(!fromEncoded);
   const [variationOptions, setVariationOptions] = useState<VariationOption[]>([]);
@@ -229,6 +406,16 @@ export default function CreatePlanClient({
   const [showReadOnlyHint, setShowReadOnlyHint] = useState(false);
   const [invalidFromError, setInvalidFromError] = useState(false);
   const [planOwnerId, setPlanOwnerId] = useState<string | null>(null);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [packSummary, setPackSummary] = useState<ExperiencePackSummary | null>(null);
+  const [packStatus, setPackStatus] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'error'>(
+    'idle'
+  );
+  const [packPreviewReason, setPackPreviewReason] = useState<
+    'no_city' | 'below_threshold' | 'no_data'
+  >('no_data');
+  const [isPackDraftDismissed, setIsPackDraftDismissed] = useState(false);
+  const [packCoachNudge, setPackCoachNudge] = useState<string | null>(null);
   const SHARE_ENABLED = false;
   const viewModeRef = useRef<{ mode: ViewMode; planId: string | null } | null>(null);
   const hasPrefilledFromSource = useRef(false);
@@ -245,6 +432,14 @@ export default function CreatePlanClient({
   const lastCloudDraftUpdatedAtRef = useRef<number>(0);
   const cloudSaveGenerationRef = useRef(0);
   const readOnlyHintShownRef = useRef(false);
+  const hasPrefilledFromParamsRef = useRef(false);
+  const lastTemplateIdRef = useRef<string | undefined>(undefined);
+  const lastAppliedTemplateIdRef = useRef<string | undefined>(undefined);
+  const planUpdateMetaRef = useRef<{
+    presetId?: string;
+    presetName?: string;
+    resolvedVerticalId?: string;
+  } | null>(null);
   const isRoleLoading = shouldCheckRole && roleStatus === 'loading';
   const isEditorReady =
     !shouldCheckRole || (roleStatus === 'resolved' && (myRole === 'owner' || myRole === 'editor'));
@@ -258,6 +453,7 @@ export default function CreatePlanClient({
     if (isTemplateReadOnly || isTemplatePreview) return 'preview';
     return 'editor';
   }, [roleReadOnly, isTemplatePreview, isTemplateReadOnly]);
+
 
   const discoveryContext = useMemo<{
     query?: string;
@@ -286,6 +482,196 @@ export default function CreatePlanClient({
       label,
     };
   }, [searchParams]);
+  const verticalToolkits = useMemo(
+    () => [
+      { id: 'idea-date', label: 'Idea-Date' },
+      { id: 'restaurants-hospitality', label: 'Restaurants & Hospitality' },
+      { id: 'events-festivals', label: 'Events & Festivals' },
+      { id: 'tourism-dmo', label: 'Tourism / DMO' },
+      { id: 'community-org', label: 'Community Org' },
+    ],
+    []
+  );
+  const verticalToolkitIds = useMemo(
+    () => new Set(verticalToolkits.map((toolkit) => toolkit.id)),
+    [verticalToolkits]
+  );
+  const toolkitOptions = useMemo(
+    () => [{ id: 'generic', label: 'Generic' }, ...verticalToolkits],
+    [verticalToolkits]
+  );
+  const [selectedToolkitId, setSelectedToolkitId] = useState<string>(() => {
+    if (plan.template_id && verticalToolkitIds.has(plan.template_id)) {
+      return plan.template_id;
+    }
+    return 'generic';
+  });
+  const [selectedPackId, setSelectedPackId] = useState<string | null>(null);
+  useEffect(() => {
+    if (plan.template_id && verticalToolkitIds.has(plan.template_id)) {
+      setSelectedToolkitId(plan.template_id);
+    } else if (!plan.template_id) {
+      setSelectedToolkitId('generic');
+    }
+  }, [plan.template_id, verticalToolkitIds]);
+
+  const selectedTemplateName = getTemplateV2ById(selectedTemplateId)?.name ?? null;
+  const renderBranch = roleReadOnly
+    ? 'role_readonly'
+    : isTemplateReadOnly
+      ? 'template_readonly'
+      : invalidFromError
+        ? 'invalid'
+        : 'editor';
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[mount_or_state_sync] check', {
+        selectedTemplateId,
+        selectedTemplateName,
+        planTemplateId: plan?.template_id,
+        lastApplied: lastAppliedTemplateIdRef.current,
+        branch: renderBranch,
+      });
+    }
+    if (!selectedTemplateId) return;
+    if (plan.template_id) return;
+    if (lastAppliedTemplateIdRef.current === selectedTemplateId) return;
+    lastAppliedTemplateIdRef.current = selectedTemplateId;
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[mount_or_state_sync] applying', { selectedTemplateId });
+    }
+    handleTemplatePresetSelection({
+      templateId: selectedTemplateId,
+      templateName: selectedTemplateName ?? selectedTemplateId,
+      applyToPlan: true,
+      allowVertical: true,
+      source: 'mount_or_state_sync',
+    });
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[mount_or_state_sync] done', {
+        selectedTemplateId,
+        planTemplateId: plan?.template_id,
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mount/state sync relies on guarded refs and should not depend on unstable callbacks
+  }, [plan.template_id, selectedTemplateId, selectedTemplateName]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return;
+    const prev = lastTemplateIdRef.current;
+    const next = plan.template_id;
+    if (prev && !next) {
+      console.warn('[template_id cleared]', {
+        prev,
+        next,
+        selectedTemplateId,
+        selectedTemplateName,
+      });
+      console.trace('[template_id cleared trace]');
+    } else if (next && prev !== next) {
+      console.log('[template_id set/change]', {
+        prev,
+        next,
+        selectedTemplateId,
+        selectedTemplateName,
+      });
+    }
+    lastTemplateIdRef.current = next;
+  }, [plan.template_id, selectedTemplateId, selectedTemplateName]);
+  function handleTemplatePresetSelection(input: {
+    templateId: string;
+    templateName?: string;
+    applyToPlan: boolean;
+    allowVertical: boolean;
+    source: 'dropdown' | 'url' | 'button' | 'mount_or_state_sync';
+  }) {
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[handleTemplatePresetSelection] start', {
+        source: input.source,
+        templateId: input.templateId,
+        templateName: input.templateName ?? null,
+      });
+    }
+    setSelectedTemplateId(input.templateId);
+    if (process.env.NODE_ENV === 'development') {
+      const normalizedId = normalizePresetKey(input.templateId);
+      const normalizedName = input.templateName ? normalizePresetKey(input.templateName) : '';
+      console.log('[presetSelect]', {
+        source: input.source,
+        presetId: input.templateId,
+        presetName: input.templateName ?? null,
+        normalizedId,
+        normalizedName,
+      });
+    }
+    if (!input.applyToPlan) {
+      if (input.allowVertical) {
+        applyPlanUpdate('template:vertical', (prev) =>
+          applyVerticalFromPresetPair(input.templateId, input.templateName ?? null, prev)
+        );
+      }
+      return;
+    }
+    applyPlanUpdate('template:select', (prev) => {
+      const nextPlan = createTemplateSeedPlan({
+        templateId: input.templateId,
+        origin: buildSeedOrigin(),
+        baseTitle: 'New plan',
+        baseIntent: 'What do we want to accomplish?',
+        baseAudience: 'me-and-friends',
+        applyVerticalPreset: false,
+      });
+      if (!input.allowVertical) return nextPlan;
+      const resolvedVerticalId = mapPresetToVerticalTemplateId({
+        id: input.templateId,
+        name: input.templateName,
+      });
+      const finalPlan = resolvedVerticalId
+        ? setPlanTemplateId(nextPlan, resolvedVerticalId)
+        : nextPlan;
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[template:select] mutate', {
+          prevTemplateId: prev.template_id ?? null,
+          nextTemplateId: finalPlan.template_id ?? null,
+        });
+      }
+      planUpdateMetaRef.current = {
+        presetId: input.templateId,
+        presetName: input.templateName,
+        resolvedVerticalId,
+      };
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[verticalPresetFinal]', {
+          presetId: input.templateId,
+          resolvedVerticalId: resolvedVerticalId ?? null,
+          finalPlanTemplateId: finalPlan.template_id ?? null,
+        });
+      }
+      return finalPlan;
+    });
+  }
+
+  function buildSeedOrigin(): PlanOrigin | null {
+    const hasOriginSource =
+      initialOrigin?.entityId ||
+      initialOrigin?.entityName ||
+      initialOrigin?.query ||
+      initialOrigin?.mood ||
+      initialOrigin?.source;
+    if (initialOrigin && hasOriginSource) {
+      return buildOriginFromContext({
+        entityId: initialOrigin.entityId,
+        label: initialOrigin.entityName,
+        query: initialOrigin.query,
+        mood: initialOrigin.mood,
+        source:
+          initialOrigin.source === 'home_search'
+            ? 'search'
+            : (initialOrigin.source as PlanOriginKind | undefined),
+      });
+    }
+    return buildOriginFromContext(discoveryContext);
+  }
 
   const setOriginOnce = useCallback((nextOrigin: Origin) => {
     if (loadOrigin()) return;
@@ -325,7 +711,6 @@ export default function CreatePlanClient({
     editTemplateParam,
     entryMode,
     isTemplatePreview,
-    isTemplateReadOnly,
     plan.isTemplate,
     planOriginKind,
   ]);
@@ -394,7 +779,7 @@ export default function CreatePlanClient({
     if (planOriginKind === 'search') {
       return {
         href: modePreservedBackToSearchHref ?? defaultBackHomeHref,
-        label: 'Back to results',
+        label: 'Back to browsing',
         onClick: handleBackToSearch,
       };
     }
@@ -403,12 +788,12 @@ export default function CreatePlanClient({
         href:
           modePreservedBackToTemplatesHref ??
           withPreservedMode('/?templates=1', searchParams),
-        label: 'Back to templates',
+        label: 'Back to browsing',
       };
     }
     return {
       href: defaultBackHomeHref,
-      label: 'Back to home',
+      label: 'Back to browsing',
     };
   }, [
     defaultBackHomeHref,
@@ -447,6 +832,41 @@ export default function CreatePlanClient({
     setOriginOnce(nextOrigin);
     setOrigin(loadOrigin());
   }, [fromParam, origin, originSourceParam, setOriginOnce]);
+
+  useEffect(() => {
+    if (hasPrefilledFromParamsRef.current) return;
+    if (planIdParam || fromParam || fromEncoded) return;
+    const preset = presetParam?.trim() || null;
+    const seed = seedParam?.trim() || null;
+    if (!preset && !seed) return;
+    hasPrefilledFromParamsRef.current = true;
+
+    if (preset) {
+      const template = getTemplateV2ById(preset);
+        if (template) {
+          handleTemplatePresetSelection({
+            templateId: template.id,
+            templateName: template.name,
+            applyToPlan: true,
+            allowVertical: true,
+            source: 'url',
+          });
+          return;
+        }
+      const templateSeed = getTemplateSeedById(preset);
+      if (templateSeed) {
+        applyPlanUpdate('template:seed', () => createPlanFromTemplateSeed(templateSeed));
+      }
+      return;
+    }
+
+    if (seed) {
+      const templateSeed = getTemplateSeedById(seed);
+      if (!templateSeed) return;
+      applyPlanUpdate('template:seed', () => createPlanFromTemplateSeed(templateSeed));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- URL-driven seed/preset init intentionally ignores unstable callbacks
+  }, [fromEncoded, fromParam, planIdParam, presetParam, seedParam]);
 
   useEffect(() => {
     setHasMounted(true);
@@ -558,8 +978,11 @@ export default function CreatePlanClient({
     if (origin.kind === 'surprise') {
       return 'Generated via Surprise Me';
     }
+    if (origin.kind === 'curated') {
+      return 'Started from curated experience';
+    }
     if (origin.kind === 'template') {
-      return 'Started from a template';
+      return 'Started from template';
     }
     if (origin.kind === 'search' && origin.label) {
       return `From search: ${origin.label}`;
@@ -573,8 +996,11 @@ export default function CreatePlanClient({
     if (origin.label) {
       return `Started from: ${origin.label}`;
     }
+    if (origin.kind === 'unknown') {
+      return 'Started from Waypoint';
+    }
     return null;
-  }, [plan.meta]);
+  }, [plan.meta, plan.origin]);
 
   const districtContext = useMemo(() => {
     const context = plan.context?.district;
@@ -684,7 +1110,7 @@ export default function CreatePlanClient({
         ? initialOrigin?.entityName || origin.label || prev.title
         : prev.title;
 
-      return {
+      const nextPlan = {
         ...prev,
         title: nextTitle,
         meta: {
@@ -693,8 +1119,12 @@ export default function CreatePlanClient({
         },
         origin,
       };
+      const preserved = preserveTemplateId(prev, nextPlan);
+      logPlanUpdate('origin:prefill', preserved);
+      return preserved;
     });
   }, [
+    discoveryContext,
     discoveryContext.entityId,
     discoveryContext.label,
     discoveryContext.mood,
@@ -721,11 +1151,8 @@ export default function CreatePlanClient({
     if (planIdParam) {
       return `waypoint:draft:plan:${planIdParam}`;
     }
-    if (origin?.sessionId) {
-      return `waypoint:draft:origin:${origin.sessionId}`;
-    }
     return null;
-  }, [fromEncoded, origin?.sessionId, planIdParam, sourcePlanId]);
+  }, [fromEncoded, planIdParam, sourcePlanId]);
 
   useEffect(() => {
     if (!hasMounted) return;
@@ -740,7 +1167,11 @@ export default function CreatePlanClient({
         const cloud = await fetchCloudPlan(planIdParam, userId);
         if (cancelled) return;
         if (cloud.ok) {
-          setPlan(cloud.plan);
+          setPlan((prev) => {
+            const preserved = preserveTemplateId(prev, cloud.plan);
+            logPlanUpdate('load:cloud-plan', preserved);
+            return preserved;
+          });
           setPlanOwnerId(cloud.ownerId ?? null);
           setPlanHydratedFromSource(true);
           hasPrefilledFromSource.current = true;
@@ -753,7 +1184,11 @@ export default function CreatePlanClient({
       if (!saved?.encoded) return;
       try {
         const decoded = deserializePlan(saved.encoded);
-        setPlan(decoded);
+        setPlan((prev) => {
+          const preserved = preserveTemplateId(prev, decoded);
+          logPlanUpdate('load:saved-plan', preserved);
+          return preserved;
+        });
         setPlanOwnerId(null);
         setPlanHydratedFromSource(true);
         hasPrefilledFromSource.current = true;
@@ -776,7 +1211,11 @@ export default function CreatePlanClient({
     if (draftKey && loadDraftByKey(draftKey)) return;
     try {
       const decoded = deserializePlan(fromParam);
-      setPlan(decoded);
+      setPlan((prev) => {
+        const preserved = preserveTemplateId(prev, decoded);
+        logPlanUpdate('load:fromParam', preserved);
+        return preserved;
+      });
       setPlanHydratedFromSource(true);
       hasPrefilledFromSource.current = false;
     } catch {
@@ -796,6 +1235,7 @@ export default function CreatePlanClient({
     return cloned;
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- generateVariationOptions is intentionally defined inline
   function generateVariationOptions(base: Plan): VariationOption[] {
     const options: VariationOption[] = [];
     const anchorName = base.stops.find((s) => s.role === 'anchor')?.name || 'anchor stop';
@@ -899,7 +1339,11 @@ export default function CreatePlanClient({
       hasPrefilledFromSource.current = true;
       lastCloudDraftJsonRef.current = JSON.stringify(result.draft);
       lastCloudDraftUpdatedAtRef.current = result.updatedAt;
-      setPlan(result.draft);
+      setPlan((prev) => {
+        const preserved = preserveTemplateId(prev, result.draft);
+        logPlanUpdate('draft:cloud', preserved);
+        return preserved;
+      });
       setPlanHydratedFromSource(true);
     })();
     return () => {
@@ -939,15 +1383,24 @@ export default function CreatePlanClient({
           setSourceExistsInSupabase(exists);
           setSourceOwnedByUser(owned);
           if (owned && !isTemplateSource) {
-            setPlan(decoded);
+            setPlan((prev) => {
+              const preserved = preserveTemplateId(prev, decoded);
+              logPlanUpdate('load:fromEncoded:owned', preserved);
+              return preserved;
+            });
             setPlanHydratedFromSource(true);
             return;
           }
         }
         if (cancelled) return;
-        setPlan(
-          isTemplateSource ? createPlanFromTemplatePlan(decoded) : createPlanFromTemplate(decoded)
-        );
+        const nextPlan = isTemplateSource
+          ? createPlanFromTemplatePlan(decoded)
+          : createPlanFromTemplate(decoded);
+        setPlan((prev) => {
+          const preserved = preserveTemplateId(prev, nextPlan);
+          logPlanUpdate('load:fromEncoded:clone', preserved);
+          return preserved;
+        });
         setPlanHydratedFromSource(true);
       } catch {
         setInvalidFromError(true);
@@ -975,6 +1428,29 @@ export default function CreatePlanClient({
     }
   }, [fromEncoded]);
 
+  useEffect(() => {
+    if (!hasMounted) return;
+    if (fromParam || fromEncoded || planIdParam) return;
+    const nextPlan = createEmptyPlan({
+      title: 'New plan',
+      intent: 'What do we want to accomplish?',
+      audience: 'me-and-friends',
+    });
+    setPlan((prev) => {
+      const preserved = preserveTemplateId(prev, nextPlan);
+      logPlanUpdate('init:empty', preserved);
+      return preserved;
+    });
+    setPlanHydratedFromSource(true);
+    setInvalidFromError(false);
+    setSourceExistsInSupabase(false);
+    setSourceOwnedByUser(false);
+    setShowCopyNotice(false);
+    hasLoadedSavedPlanRef.current = false;
+    hasRestoredDraftRef.current = false;
+    hasPrefilledFromSource.current = false;
+  }, [fromEncoded, fromParam, hasMounted, planIdParam]);
+
 
   useEffect(() => {
     if (!hasMounted) return;
@@ -989,7 +1465,11 @@ export default function CreatePlanClient({
     if (!draft) return;
     hasRestoredDraftRef.current = true;
     hasPrefilledFromSource.current = true;
-    setPlan(draft);
+    setPlan((prev) => {
+      const preserved = preserveTemplateId(prev, draft);
+      logPlanUpdate('draft:local', preserved);
+      return preserved;
+    });
     setPlanHydratedFromSource(true);
   }, [draftKey, hasMounted, isEditorReady, plan.id, userId, cloudDraftReady]);
 
@@ -1026,6 +1506,80 @@ export default function CreatePlanClient({
     setShowCopyNotice(true);
   }, [fromEncoded]);
 
+  function generateStopId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `stop_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  const PLACEHOLDER_NOTE = 'Pick from search results.';
+
+  function storeTemplateIdForPlan(planId: string, templateId: string) {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(`plan-template:${planId}`, templateId);
+    } catch {
+      // ignore storage failures; createdFrom still carries templateId
+    }
+  }
+
+  function buildTemplateStops(template: TemplateV2): Stop[] {
+    const count = Math.max(1, template.defaultStopCount);
+    const stops: Stop[] = [];
+    for (let index = 0; index < count; index += 1) {
+      stops.push({
+        id: generateStopId(),
+        name: `Stop ${index + 1}`,
+        role: index === 0 ? 'anchor' : 'support',
+        optionality: 'required',
+        notes: PLACEHOLDER_NOTE,
+      });
+    }
+    return stops;
+  }
+
+  function createTemplateSeedPlan(input?: {
+    templateId?: string | null;
+    origin?: PlanOrigin | null;
+    baseTitle?: string;
+    baseIntent?: string;
+    baseAudience?: string;
+    applyVerticalPreset?: boolean;
+  }): Plan {
+    const template =
+      getTemplateV2ById(input?.templateId) ?? getTemplateV2ById(DEFAULT_TEMPLATE_V2_ID);
+    const safeTemplate =
+      template ?? TEMPLATES_V2.find((item) => item.id === DEFAULT_TEMPLATE_V2_ID) ?? TEMPLATES_V2[0];
+    const next = createEmptyPlan({
+      title: input?.baseTitle ?? 'New plan',
+      intent: input?.baseIntent ?? 'What do we want to accomplish?',
+      audience: input?.baseAudience ?? 'me-and-friends',
+    });
+    const nextPlan =
+      input?.applyVerticalPreset === false
+        ? setPlanTemplateId(next, undefined)
+        : applyVerticalFromPreset(safeTemplate.id, next);
+    nextPlan.stops = buildTemplateStops(safeTemplate);
+    nextPlan.createdFrom = {
+      kind: 'template',
+      templateId: safeTemplate.id,
+      templateTitle: safeTemplate.name,
+    };
+    if (input?.origin) {
+      const nextTitle =
+        nextPlan.title === 'New plan' && input.origin.label ? input.origin.label : nextPlan.title;
+      nextPlan.title = nextTitle;
+      nextPlan.meta = {
+        ...nextPlan.meta,
+        origin: input.origin,
+      };
+      nextPlan.origin = input.origin;
+    }
+    storeTemplateIdForPlan(nextPlan.id, safeTemplate.id);
+    return nextPlan;
+  }
+
   useEffect(() => {
     // Ensure source-driven plans have a meaningful title/anchor stop when they arrive
     if (!planHydratedFromSource || hasPrefilledFromSource.current) return;
@@ -1052,7 +1606,11 @@ export default function CreatePlanClient({
       updated = true;
     }
     if (updated) {
-      setPlan(nextPlan);
+      setPlan((prev) => {
+        const preserved = preserveTemplateId(prev, nextPlan);
+        logPlanUpdate('source:prefill', preserved);
+        return preserved;
+      });
     }
     hasPrefilledFromSource.current = true;
   }, [plan, planHydratedFromSource]);
@@ -1060,13 +1618,6 @@ export default function CreatePlanClient({
   useEffect(() => {
     hasPrefilledFromSource.current = false;
   }, [plan.id]);
-
-  function generateStopId() {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-    return `stop_${Math.random().toString(36).slice(2, 8)}`;
-  }
 
   function isMeaningfulDraft(nextPlan: Plan) {
     const hasStops = (nextPlan.stops ?? []).length > 0;
@@ -1123,43 +1674,195 @@ export default function CreatePlanClient({
     queueCloudDraftSave(nextPlan);
   }
 
-  function applyPlanUpdate(reason: string, recipe: (prev: Plan) => Plan) {
+  function logPlanUpdate(
+    label: string,
+    nextPlan: Plan,
+    meta?: { presetId?: string; presetName?: string; resolvedVerticalId?: string } | null
+  ) {
+    if (process.env.NODE_ENV !== 'development') return;
+    console.log('[plan update]', {
+      label,
+      presetId: meta?.presetId,
+      presetName: meta?.presetName,
+      resolvedVerticalId: meta?.resolvedVerticalId,
+      template_id: nextPlan.template_id,
+    });
+  }
+
+  function preserveTemplateId(prev: Plan, next: Plan): Plan {
+    if (Object.prototype.hasOwnProperty.call(next, 'template_id')) return next;
+    if (!next.template_id && prev.template_id) {
+      return { ...next, template_id: prev.template_id };
+    }
+    return next;
+  }
+
+  function applyPlanUpdate(
+    reason: string,
+    recipe: (prev: Plan) => Plan,
+    onAfter?: (prev: Plan, next: Plan) => void
+  ) {
     if (isReadOnly) return;
     setPlan((prev) => {
       const nextPlan = recipe(prev);
       if (nextPlan === prev) return prev;
-      queueDraftSave(nextPlan);
-      return nextPlan;
+      const preserved = preserveTemplateId(prev, nextPlan);
+      const meta = planUpdateMetaRef.current;
+      planUpdateMetaRef.current = null;
+      logPlanUpdate(reason, preserved, meta);
+      queueDraftSave(preserved);
+      onAfter?.(prev, preserved);
+      return preserved;
+    });
+  }
+
+  function getStopTypeIdForEvent(stop: Stop | undefined | null): string | null {
+    if (!stop) return null;
+    return stop.stop_type_id ?? null;
+  }
+
+  function getDefaultStopTypeIdForNewStop(): string | undefined {
+    if (!verticalTemplate) return undefined;
+    const stopTypeIds = verticalTemplate.stopTypes.map((stopType) => stopType.id);
+    if (stopTypeIds.includes('support')) return 'support';
+    return (
+      verticalTemplate.editorGuidance?.suggestedOrder?.[0] ??
+      verticalTemplate.stopTypes[0]?.id
+    );
+  }
+
+  function logStopEvent(eventType: string, nextPlan: Plan, stopTypeId: string | null) {
+    if (!nextPlan.id) return;
+    void logEvent(eventType, {
+      planId: nextPlan.id,
+      templateId: nextPlan.template_id ?? null,
+      stopTypeId: stopTypeId ?? null,
     });
   }
 
   function updateStop(id: string, updater: (stop: Stop) => Stop) {
-    applyPlanUpdate('stop:update', (prev) => ({
-      ...prev,
-      stops: prev.stops.map((stop) => (stop.id === id ? updater(stop) : stop)),
-    }));
+    let beforeType: string | null = null;
+    let afterType: string | null = null;
+    applyPlanUpdate(
+      'stop:update',
+      (prev) => ({
+        ...prev,
+        stops: prev.stops.map((stop) => {
+          if (stop.id !== id) return stop;
+          beforeType = getStopTypeIdForEvent(stop);
+          const nextStop = updater(stop);
+          afterType = getStopTypeIdForEvent(nextStop);
+          return nextStop;
+        }),
+      }),
+      (_prev, next) => {
+        if (beforeType === afterType) return;
+        const stopTypeId = afterType ?? beforeType;
+        logStopEvent('stop_type_changed', next, stopTypeId ?? null);
+      }
+    );
   }
 
   function removeStop(id: string) {
-    applyPlanUpdate('stop:remove', (prev) => ({
-      ...prev,
-      stops: prev.stops.filter((stop) => stop.id !== id),
-    }));
+    let removedType: string | null = null;
+    applyPlanUpdate(
+      'stop:remove',
+      (prev) => ({
+        ...prev,
+        stops: prev.stops.filter((stop) => {
+          if (stop.id !== id) return true;
+          removedType = getStopTypeIdForEvent(stop);
+          return false;
+        }),
+      }),
+      (_prev, next) => {
+        logStopEvent('stop_removed', next, removedType);
+      }
+    );
   }
 
   function addStop() {
-    applyPlanUpdate('stop:add', (prev) => ({
-      ...prev,
-      stops: [
-        ...prev.stops,
-        {
+    let newStopType: string | null = null;
+    applyPlanUpdate(
+      'stop:add',
+      (prev) => {
+        const stopTypeId = getDefaultStopTypeIdForNewStop();
+        const newStop: Stop = {
           id: generateStopId(),
           name: 'New stop',
           role: 'support',
           optionality: 'flexible',
-        },
-      ],
-    }));
+          stop_type_id: stopTypeId,
+        };
+        newStopType = getStopTypeIdForEvent(newStop);
+        return {
+          ...prev,
+          stops: [...prev.stops, newStop],
+        };
+      },
+      (_prev, next) => {
+        logStopEvent('stop_added', next, newStopType);
+      }
+    );
+  }
+
+  function buildPackPlaceholderStop(
+    index: number,
+    stopTypeId?: string,
+    forceAnchor?: boolean
+  ): Stop {
+    return {
+      id: generateStopId(),
+      name: `Suggested stop ${index + 1}`,
+      role: forceAnchor ? 'anchor' : 'support',
+      optionality: 'flexible',
+      stop_type_id: stopTypeId,
+      notes: PLACEHOLDER_NOTE,
+      resolve: { placeholder: true },
+    };
+  }
+
+  function applyExperiencePackDraft(draft: ExperiencePackDraft) {
+    let nextCoachNudge: string | null = null;
+    applyPlanUpdate('pack:draft_apply', (prev) => {
+      const sequence = draft.commonStopSequence ?? [];
+      const nextStops = [...(prev.stops ?? [])];
+      const startedEmpty = nextStops.length === 0;
+
+      if (startedEmpty && sequence.length > 0) {
+        sequence.forEach((stopTypeId, index) => {
+          nextStops.push(
+            buildPackPlaceholderStop(index, stopTypeId || undefined, index === 0)
+          );
+        });
+      }
+
+      const targetCount =
+        typeof draft.typicalStopsCount === 'number' && draft.typicalStopsCount > 0
+          ? draft.typicalStopsCount
+          : 0;
+      while (nextStops.length < targetCount) {
+        const seqType = sequence[nextStops.length] ?? undefined;
+        nextStops.push(buildPackPlaceholderStop(nextStops.length, seqType, false));
+      }
+
+      if (nextStops.length === prev.stops.length) {
+        return prev;
+      }
+
+      const hasAnchorStop = prev.stops.some((stop) => stop.role === 'anchor');
+      if (!hasAnchorStop && draft.typicalHourBin) {
+        nextCoachNudge = `Packs often work best in ${draft.typicalHourBin}. Add a time anchor if you want.`;
+      } else {
+        nextCoachNudge = null;
+      }
+
+      return {
+        ...prev,
+        stops: nextStops,
+      };
+    });
+    setPackCoachNudge(nextCoachNudge);
   }
 
   function updatePresentation(next: Partial<NonNullable<Plan['presentation']>>) {
@@ -1217,25 +1920,47 @@ export default function CreatePlanClient({
   }
 
   function moveStopUp(index: number) {
-    applyPlanUpdate('stop:move-up', (prev) => {
-      if (index <= 0) return prev;
-      const nextStops = [...prev.stops];
-      const temp = nextStops[index - 1];
-      nextStops[index - 1] = nextStops[index];
-      nextStops[index] = temp;
-      return { ...prev, stops: nextStops };
-    });
+    let movedType: string | null = null;
+    let didMove = false;
+    applyPlanUpdate(
+      'stop:move-up',
+      (prev) => {
+        if (index <= 0) return prev;
+        const nextStops = [...prev.stops];
+        movedType = getStopTypeIdForEvent(nextStops[index]);
+        const temp = nextStops[index - 1];
+        nextStops[index - 1] = nextStops[index];
+        nextStops[index] = temp;
+        didMove = true;
+        return { ...prev, stops: nextStops };
+      },
+      (_prev, next) => {
+        if (!didMove) return;
+        logStopEvent('stop_reordered', next, movedType);
+      }
+    );
   }
 
   function moveStopDown(index: number) {
-    applyPlanUpdate('stop:move-down', (prev) => {
-      if (index >= prev.stops.length - 1) return prev;
-      const nextStops = [...prev.stops];
-      const temp = nextStops[index + 1];
-      nextStops[index + 1] = nextStops[index];
-      nextStops[index] = temp;
-      return { ...prev, stops: nextStops };
-    });
+    let movedType: string | null = null;
+    let didMove = false;
+    applyPlanUpdate(
+      'stop:move-down',
+      (prev) => {
+        if (index >= prev.stops.length - 1) return prev;
+        const nextStops = [...prev.stops];
+        movedType = getStopTypeIdForEvent(nextStops[index]);
+        const temp = nextStops[index + 1];
+        nextStops[index + 1] = nextStops[index];
+        nextStops[index] = temp;
+        didMove = true;
+        return { ...prev, stops: nextStops };
+      },
+      (_prev, next) => {
+        if (!didMove) return;
+        logStopEvent('stop_reordered', next, movedType);
+      }
+    );
   }
 
   const syncIfCommitted = useCallback(
@@ -1245,73 +1970,118 @@ export default function CreatePlanClient({
       const saved = upsertRecentPlan(nextPlan);
       setIsSaved(saved.isSaved);
       if (!userId) return;
-      try {
-        const parentId =
-          sourceExistsInSupabase && sourcePlanId && sourcePlanId !== nextPlan.id
-            ? sourcePlanId
-            : null;
-        const { data: sessionData } = await supabase.auth.getSession();
-        if (!sessionData.session?.user) return;
-        await upsertCloudPlan(nextPlan, userId, { parentId });
-      } catch {
-        // ignore persistence errors to keep UI lightweight
-      }
-    },
+        try {
+          const parentId =
+            sourceExistsInSupabase && sourcePlanId && sourcePlanId !== nextPlan.id
+              ? sourcePlanId
+              : null;
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (!sessionData.session?.user) return;
+          await upsertCloudPlan(
+            {
+              ...nextPlan,
+              owner: nextPlan.owner ?? { type: 'user', id: userId },
+              editPolicy:
+                nextPlan.editPolicy ??
+                ((nextPlan.origin?.kind ?? nextPlan.meta?.origin?.kind) === 'curated'
+                  ? 'fork_required'
+                  : 'owner_only'),
+            },
+            userId,
+            { parentId }
+          );
+        } catch {
+          // ignore persistence errors to keep UI lightweight
+        }
+      },
     [isCommitted, isEditorReady, sourceExistsInSupabase, sourcePlanId, supabase, userId]
   );
 
   const commitPlan = useCallback(
-    async (nextPlan: Plan) => {
-      if (isReadOnly) return false;
-      setCommitStatus('saving');
-      setCloudCommitError(null);
-      let didCommit = false;
-      try {
-        if (nextPlan !== plan) {
-          setPlan(nextPlan);
-        }
-        const saved = upsertRecentPlan(nextPlan);
-        setIsSaved(saved.isSaved);
-        setIsCommitted(true);
-        didCommit = true;
-        clearDraftByKey(draftKey);
-        if (userId && draftKey) {
-          await clearCloudDraft(draftKey, userId);
-        }
-        const nextParams = new URLSearchParams();
-        nextParams.set('planId', nextPlan.id);
-        const q = searchParams.get('q');
-        const mood = searchParams.get('mood');
-        if (q) nextParams.set('q', q);
-        if (mood) nextParams.set('mood', mood);
-        const nextHref = withPreservedMode(`/create?${nextParams.toString()}`, searchParams);
-        router.replace(nextHref, { scroll: false });
-        setCommitStatus('done');
-        setTimeout(() => setCommitStatus('idle'), 1200);
-      } catch {
+      async (nextPlan: Plan) => {
+        if (isReadOnly) return false;
+        setCommitStatus('saving');
+        setCloudCommitError(null);
+        let didCommit = false;
+        try {
+          const originKind = nextPlan.origin?.kind ?? nextPlan.meta?.origin?.kind;
+          const editPolicy =
+            nextPlan.editPolicy ?? (originKind === 'curated' ? 'fork_required' : 'owner_only');
+          const planWithOwner: Plan = {
+            ...nextPlan,
+            owner: nextPlan.owner ?? (userId ? { type: 'user', id: userId } : undefined),
+            editPolicy,
+          };
+          if (planWithOwner !== plan) {
+            setPlan((prev) => {
+              const preserved = preserveTemplateId(prev, planWithOwner);
+              logPlanUpdate('commit:owner', preserved);
+              return preserved;
+            });
+          }
+          const saved = upsertRecentPlan(planWithOwner);
+          setIsSaved(saved.isSaved);
+          setIsCommitted(true);
+          didCommit = true;
+          clearDraftByKey(draftKey);
+          if (userId && draftKey) {
+            await clearCloudDraft(draftKey, userId);
+          }
+          const nextHref = withPreservedMode(
+            `/plans/${encodeURIComponent(planWithOwner.id)}`,
+            searchParams
+          );
+          router.replace(nextHref);
+          setCommitStatus('done');
+          setTimeout(() => setCommitStatus('idle'), 1200);
+        } catch {
         setCommitStatus('error');
         setTimeout(() => setCommitStatus('idle'), 1500);
       }
-      if (!didCommit) return false;
-      if (!userId) return didCommit;
-      const parentId =
-        sourceExistsInSupabase && sourcePlanId && sourcePlanId !== nextPlan.id
-          ? sourcePlanId
-          : null;
-      try {
-        const { data: sessionData } = await supabase.auth.getSession();
-        if (!sessionData.session?.user) return;
-        const result = await upsertCloudPlan(nextPlan, userId, { parentId });
-        if (!result.ok) {
+        if (!didCommit) return false;
+        if (!userId) return didCommit;
+        const parentId =
+          sourceExistsInSupabase && sourcePlanId && sourcePlanId !== nextPlan.id
+            ? sourcePlanId
+            : null;
+        try {
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (!sessionData.session?.user) return;
+          const result = await upsertCloudPlan(
+            {
+              ...nextPlan,
+              owner: nextPlan.owner ?? { type: 'user', id: userId },
+              editPolicy:
+                nextPlan.editPolicy ??
+                ((nextPlan.origin?.kind ?? nextPlan.meta?.origin?.kind) === 'curated'
+                  ? 'fork_required'
+                  : 'owner_only'),
+            },
+            userId,
+            { parentId }
+          );
+          if (!result.ok) {
+            setCloudCommitError('Saved locally; cloud save failed.');
+          }
+            if (result.ok) {
+              void logEvent('plan_created', {
+                planId: nextPlan.id,
+                templateId: nextPlan.template_id ?? null,
+                payload: {
+                  originKind: nextPlan.origin?.kind ?? nextPlan.meta?.origin?.kind ?? null,
+                  source: 'cloud',
+                  from: fromContextParam ?? null,
+                },
+              });
+            }
+        } catch {
           setCloudCommitError('Saved locally; cloud save failed.');
         }
-      } catch {
-        setCloudCommitError('Saved locally; cloud save failed.');
-      }
-      return didCommit;
+        return didCommit;
     },
     [
       draftKey,
+      fromContextParam,
       isReadOnly,
       plan,
       router,
@@ -1339,7 +2109,7 @@ export default function CreatePlanClient({
     if (userId && draftKey) {
       void clearCloudDraft(draftKey, userId);
     }
-  }, [draftKey, isCommitted]);
+  }, [draftKey, isCommitted, userId]);
 
   useEffect(() => {
     if (!fromEncoded) return;
@@ -1355,7 +2125,7 @@ export default function CreatePlanClient({
     setVariationOptions(options);
     setShowVariations(true);
     window.localStorage.setItem(seen, '1');
-  }, [fromEncoded, getVariationKeys, plan, planHydratedFromSource]);
+  }, [fromEncoded, generateVariationOptions, getVariationKeys, plan, planHydratedFromSource]);
 
   const handleDismissVariations = useCallback(() => {
     if (typeof window !== 'undefined' && plan.id) {
@@ -1422,17 +2192,19 @@ export default function CreatePlanClient({
       ? 'From template'
       : null;
   const templateHelper = plan.isTemplate
-    ? "You're viewing a template. Use it to start a new plan."
+    ? "You&apos;re viewing a template. Start from it to author a plan."
     : plan.createdFrom?.kind === 'template'
-      ? `Based on template: ${plan.createdFrom.templateTitle ?? 'Template'}`
+      ? `Started from template: ${plan.createdFrom.templateTitle ?? 'Template'}`
       : null;
 
   const templateEditorHref = useMemo(() => {
     if (!plan.isTemplate) return null;
     const next = createPlanFromTemplatePlan(plan);
+    const createdFromTitle =
+      next.createdFrom?.kind === 'template' ? next.createdFrom.templateTitle : undefined;
     const origin = {
       kind: 'template' as const,
-      label: next.createdFrom?.templateTitle ?? plan.title,
+      label: createdFromTitle ?? plan.title,
       entityId: plan.id,
     };
     next.meta = {
@@ -1450,9 +2222,9 @@ export default function CreatePlanClient({
 
   const openEditorAction = useMemo(() => {
     if (!hasFrom && (isTemplateReadOnly || isTemplatePreview) && templateEditorHref) {
-      return { href: templateEditorHref, label: 'Open editor (Plan mode)' };
+      return { href: templateEditorHref, label: 'Start from template' };
     }
-    return { href: openEditorHref, label: 'Open editor (Plan mode)' };
+    return { href: openEditorHref, label: 'Open plan editor' };
   }, [
     hasFrom,
     isTemplateReadOnly,
@@ -1491,6 +2263,370 @@ export default function CreatePlanClient({
     return withPreservedMode(`/create?${params.toString()}`, searchParams);
   }, [editorReturnTo, plan.id, searchParams]);
 
+  const verticalTemplate = resolvePlanTemplate(plan);
+  const guidance = buildVerticalGuidance({ template: verticalTemplate, planLike: plan });
+  const experiencePackTemplateId = plan.template_id?.trim() || '';
+  const experiencePackDistrict = useMemo(() => {
+    for (const stop of plan.stops ?? []) {
+      const formattedAddress = stop.placeLite?.formattedAddress;
+      if (typeof formattedAddress !== 'string' || !formattedAddress.trim()) continue;
+      const derivedDistrict = extractDistrict(formattedAddress);
+      if (derivedDistrict) return derivedDistrict;
+    }
+    return '';
+  }, [plan.stops]);
+  const experiencePackCity = useMemo(() => {
+    for (const stop of plan.stops ?? []) {
+      const formattedAddress = stop.placeLite?.formattedAddress;
+      if (typeof formattedAddress !== 'string' || !formattedAddress.trim()) continue;
+      const derivedCity = extractCity(formattedAddress);
+      if (derivedCity) return derivedCity;
+    }
+    return '';
+  }, [plan.stops]);
+  const experiencePackLocation = experiencePackDistrict || experiencePackCity || 'Unknown';
+  const experiencePackDayOfWeek = useMemo(() => {
+    const planRecord = plan as unknown as Record<string, unknown>;
+    const dateRaw = typeof planRecord.date === 'string' ? planRecord.date : null;
+    const dayOfWeek = getDayOfWeekFromDateInput(dateRaw);
+    return typeof dayOfWeek === 'number' ? dayOfWeek : undefined;
+  }, [plan]);
+  const experiencePackHourBin = useMemo(() => {
+    const planRecord = plan as unknown as Record<string, unknown>;
+    const timeRaw = typeof planRecord.time === 'string' ? planRecord.time : null;
+    const hourBin = getHourBinFromTimeInput(timeRaw);
+    return hourBin ?? undefined;
+  }, [plan]);
+  const experiencePackMinDistinctPlans = process.env.NODE_ENV === 'development' ? 1 : 3;
+  const shouldLogVerticalDebug = process.env.NEXT_PUBLIC_VERTICAL_DEBUG === '1';
+  const experiencePackLocationKnown =
+    experiencePackLocation.trim().length > 0 &&
+    experiencePackLocation.trim().toLowerCase() !== 'unknown';
+  const templateStopTypeIds = useMemo(
+    () =>
+      (verticalTemplate?.stopTypes ?? [])
+        .map((stopType) => stopType.id)
+        .filter((stopTypeId): stopTypeId is string => Boolean(stopTypeId?.trim())),
+    [verticalTemplate]
+  );
+  const earnedExperiencePackDraft = useMemo<ExperiencePackDraft | null>(() => {
+    if (!packSummary || !experiencePackTemplateId) return null;
+    return buildExperiencePackDraft(packSummary, {
+      templateId: experiencePackTemplateId,
+      city: experiencePackLocation || null,
+    });
+  }, [experiencePackLocation, experiencePackTemplateId, packSummary]);
+  const previewExperiencePackDraft = useMemo<ExperiencePackDraft | null>(() => {
+    if (!experiencePackTemplateId) return null;
+    return buildPreviewExperiencePackDraft({
+      templateId: experiencePackTemplateId,
+      city: experiencePackLocation || null,
+      templateStopTypeIds,
+    });
+  }, [experiencePackLocation, experiencePackTemplateId, templateStopTypeIds]);
+  const packMode: 'earned' | 'preview' = earnedExperiencePackDraft ? 'earned' : 'preview';
+  const experiencePackDraft =
+    packMode === 'earned' ? earnedExperiencePackDraft : previewExperiencePackDraft;
+  const experienceSequenceLabels = useMemo(() => {
+    if (!experiencePackDraft || (experiencePackDraft.commonStopSequence ?? []).length === 0) {
+      return 'No common flow yet.';
+    }
+    const stopTypeById = new Map<string, string>();
+    (verticalTemplate?.stopTypes ?? []).forEach((stopType) => {
+      if (!stopType?.id) return;
+      stopTypeById.set(stopType.id, stopType.label ?? stopType.id);
+    });
+    return (experiencePackDraft.commonStopSequence ?? [])
+      .map((stopTypeId) => stopTypeById.get(stopTypeId) ?? stopTypeId)
+      .join(' -> ');
+  }, [experiencePackDraft, verticalTemplate]);
+  useEffect(() => {
+    setIsPackDraftDismissed(false);
+    setPackCoachNudge(null);
+  }, [experiencePackLocation, experiencePackTemplateId]);
+  const shouldShowExperiencePack = Boolean(experiencePackTemplateId);
+  const shouldRenderExperiencePackCard = shouldShowExperiencePack && !isPackDraftDismissed;
+  const experiencePackCard = shouldRenderExperiencePackCard ? (
+    <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-2">
+      <h2 className="text-sm font-semibold text-slate-200">
+        {packMode === 'preview'
+          ? 'Experience Pack Draft (Preview)'
+          : 'Experience pack draft'}
+      </h2>
+      {packMode === 'earned' && experiencePackLocationKnown ? (
+        <p className="text-xs text-slate-400">
+          Based on recently completed plans of this toolkit in {experiencePackLocation}.
+        </p>
+      ) : null}
+      {packMode === 'preview' ? (
+        <div className="space-y-1 text-xs text-slate-400">
+          <p>Not enough completed plans yet to assemble a reliable pack.</p>
+          <p>
+            This starter structure is based on the toolkit template and will improve as more plans
+            are completed.
+          </p>
+        </div>
+      ) : null}
+      {packStatus === 'loading' && packMode === 'preview' && experiencePackLocationKnown ? (
+        <p className="text-xs text-slate-500">Loading...</p>
+      ) : null}
+      {!experiencePackDraft ? (
+        <p className="text-xs text-slate-400">
+          Pack draft is unavailable for this toolkit.
+        </p>
+      ) : (
+        <div className="space-y-2 text-sm text-slate-300">
+          <p>Usually {experiencePackDraft.typicalStopsCount ?? 0} stops</p>
+          <p>Common flow: {experienceSequenceLabels}</p>
+          {experiencePackDraft.typicalHourBin ? (
+            <p>Often {experiencePackDraft.typicalHourBin}</p>
+          ) : null}
+          {packMode === 'earned' ? (
+            <p className="text-xs text-slate-400">
+              Based on {experiencePackDraft.evidence.distinctPlans} completed plan(s) in{' '}
+              {experiencePackDraft.city ?? experiencePackLocation}.
+            </p>
+          ) : null}
+          <ul className="space-y-1 text-xs text-slate-400">
+            {experiencePackDraft.notes.map((note, index) => (
+              <li key={`pack-note-${index}`}>• {note}</li>
+            ))}
+          </ul>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => applyExperiencePackDraft(experiencePackDraft)}
+              disabled={isReadOnly}
+              className={`${ctaClass('chip')} text-[11px] disabled:opacity-60 disabled:cursor-not-allowed`}
+            >
+              Apply draft
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsPackDraftDismissed(true)}
+              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-[11px] text-slate-300 hover:bg-slate-800"
+            >
+              Dismiss
+            </button>
+          </div>
+          {experiencePackDraft.typicalHourBin ? (
+            <p className="text-[11px] text-slate-500">
+              Time guidance is optional and remains editable.
+            </p>
+          ) : null}
+          {shouldLogVerticalDebug ? (
+            <p className="text-[10px] text-slate-500">
+              pack_mode: '{packMode}' | reason: '{packPreviewReason}' | flip_condition:
+              'distinctCompletedPlans &gt;= 3 AND cityKnown'
+            </p>
+          ) : null}
+        </div>
+      )}
+    </section>
+  ) : null;
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[create render]', {
+      template_id: plan.template_id,
+      selectedTemplateId,
+      selectedTemplateName,
+      verticalTemplateId: verticalTemplate?.id ?? null,
+      verticalTemplateName: verticalTemplate?.name ?? null,
+      planIdentity:
+        plan.id ||
+        JSON.stringify({
+          title: plan.title ?? null,
+          intent: plan.intent ?? null,
+          stops: plan.stops?.length ?? 0,
+        }),
+    });
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadExperiencePack() {
+      if (!hasMounted) return;
+      if (!experiencePackTemplateId) {
+        if (!cancelled) {
+          setPackSummary(null);
+          setPackStatus('idle');
+          setPackPreviewReason('no_data');
+          if (shouldLogVerticalDebug) {
+            console.log('[experience-pack:create]', {
+              templateId: experiencePackTemplateId || null,
+              derivedLocation: experiencePackLocation || null,
+              minDistinctPlans: experiencePackMinDistinctPlans,
+              evidence: null,
+            });
+          }
+        }
+        return;
+      }
+      if (!experiencePackLocationKnown) {
+        if (!cancelled) {
+          setPackSummary(null);
+          setPackStatus('ready');
+          setPackPreviewReason('no_city');
+          if (shouldLogVerticalDebug) {
+            console.log('[experience-pack:create]', {
+              templateId: experiencePackTemplateId || null,
+              derivedLocation: experiencePackLocation || null,
+              minDistinctPlans: experiencePackMinDistinctPlans,
+              evidence: null,
+              mode: 'preview',
+              reason: 'no_city',
+            });
+          }
+        }
+        return;
+      }
+      if (!cancelled) {
+        setPackStatus('loading');
+      }
+      const earnedResult = await getExperiencePackSummary({
+        templateId: experiencePackTemplateId,
+        location: experiencePackLocation,
+        dayOfWeek: experiencePackDayOfWeek,
+        hourBin: experiencePackHourBin,
+        limitPlans: 50,
+        minDistinctPlans: experiencePackMinDistinctPlans,
+      });
+      if (cancelled) return;
+      if (shouldLogVerticalDebug) {
+        const evidence =
+          earnedResult.data?.evidence
+            ? {
+                distinctPlans: earnedResult.data.evidence.count ?? null,
+                totalSignals:
+                  (earnedResult.data.evidence as { totalSignals?: number | null }).totalSignals ??
+                  null,
+              }
+            : null;
+        console.log('[experience-pack:create]', {
+          templateId: experiencePackTemplateId || null,
+          derivedLocation: experiencePackLocation || null,
+          minDistinctPlans: experiencePackMinDistinctPlans,
+          evidence,
+        });
+      }
+      if (earnedResult.error) {
+        setPackSummary(null);
+        setPackStatus('error');
+        setPackPreviewReason('no_data');
+        return;
+      }
+      if (earnedResult.data) {
+        setPackSummary(earnedResult.data);
+        setPackStatus('ready');
+        setPackPreviewReason('no_data');
+        return;
+      }
+
+      const probeResult = await getExperiencePackSummary({
+        templateId: experiencePackTemplateId,
+        location: experiencePackLocation,
+        dayOfWeek: experiencePackDayOfWeek,
+        hourBin: experiencePackHourBin,
+        limitPlans: 50,
+        minDistinctPlans: 1,
+      });
+      if (cancelled) return;
+      if (probeResult.error) {
+        setPackSummary(null);
+        setPackStatus('error');
+        setPackPreviewReason('no_data');
+        return;
+      }
+      const probeDistinctPlans = probeResult.data?.evidence?.count ?? 0;
+      const reason =
+        probeResult.data && probeDistinctPlans < experiencePackMinDistinctPlans
+          ? 'below_threshold'
+          : 'no_data';
+      setPackSummary(null);
+      setPackStatus('empty');
+      setPackPreviewReason(reason);
+    }
+    void loadExperiencePack();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    experiencePackLocation,
+    experiencePackDayOfWeek,
+    experiencePackHourBin,
+    experiencePackTemplateId,
+    experiencePackLocationKnown,
+    experiencePackMinDistinctPlans,
+    hasMounted,
+    shouldLogVerticalDebug,
+  ]);
+
+  if (!hasMounted) {
+    return null;
+  }
+
+  const onTrackLines =
+    guidance.affirmations.length > 0
+      ? guidance.affirmations
+      : ['Open canvas — add a few stops and I’ll help shape the flow.'];
+  const baseIdeaLines =
+    guidance.suggestions.length > 0
+      ? guidance.suggestions
+      : ['I can suggest a flow once there are a few stops.'];
+  const ideaLines = packCoachNudge ? [...baseIdeaLines, packCoachNudge] : baseIdeaLines;
+  const summaryLine = onTrackLines[0] ?? ideaLines[0] ?? 'Your plan is ready to shape.';
+  const warningCount = guidance.warnings.length;
+  const warningLabel = warningCount === 1 ? '1 watch out' : `${warningCount} watch outs`;
+  const guidanceBlock = (
+    <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
+          <span>Coach: {summaryLine}</span>
+          {warningCount > 0 ? (
+            <span className="rounded-full border border-amber-400/60 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-200">
+              {warningLabel}
+            </span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowSuggestions((prev) => !prev)}
+          className="text-[11px] text-slate-400 hover:text-slate-200"
+        >
+          {showSuggestions ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {showSuggestions ? (
+        <div className="space-y-3">
+          <div className="space-y-1 text-[11px] text-slate-300">
+            <div className="font-semibold text-slate-200">✅ On track</div>
+            <ul className="space-y-1 text-[11px] text-slate-300">
+              {onTrackLines.map((line, index) => (
+                <li key={`guidance-affirmation-${index}`}>• {line}</li>
+              ))}
+            </ul>
+          </div>
+          {guidance.warnings.length > 0 ? (
+            <div className="space-y-1">
+              <div className="text-[11px] font-semibold text-amber-200">⚠️ Watch outs</div>
+              <ul className="space-y-1 text-[11px] text-amber-200">
+                {guidance.warnings.map((warning, index) => (
+                  <li key={`guidance-warning-${index}`}>• {warning}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <div className="space-y-1">
+            <div className="text-[11px] font-semibold text-slate-200">💡 Ideas</div>
+            <ul className="space-y-1 text-[11px] text-slate-300">
+              {ideaLines.map((tip, index) => (
+                <li key={`guidance-suggestion-${index}`}>• {tip}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
 
   if (isRoleLoading) {
     return (
@@ -1568,7 +2704,7 @@ export default function CreatePlanClient({
             {readOnlyActionStrip}
             {showReadOnlyHint ? (
               <div className="text-[11px] text-amber-100/90">
-                Read-only here. Use "Open editor (Plan mode)" to edit.
+                Read-only here. Use {openEditorAction.label} to edit.
               </div>
             ) : null}
           </div>
@@ -1579,7 +2715,7 @@ export default function CreatePlanClient({
             <p className="text-slate-400">Ask the owner for edit access.</p>
             {roleError ? (
               <p className="text-[11px] text-slate-500">
-                We couldn't verify edit access. Viewing as read-only.
+                We couldn&apos;t verify edit access. Viewing as read-only.
               </p>
             ) : null}
           </div>
@@ -1588,6 +2724,10 @@ export default function CreatePlanClient({
             <h2 className="text-sm font-semibold text-slate-200">Intent</h2>
             <p className="text-sm text-slate-200">{readOnlyIntent}</p>
           </section>
+
+          {guidanceBlock}
+
+          {experiencePackCard}
 
           <section className="space-y-4">
             <h2 className="text-sm font-semibold text-slate-200">Plan stops</h2>
@@ -1605,10 +2745,18 @@ export default function CreatePlanClient({
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-xs uppercase tracking-wide text-slate-400">
-                        Stop {index + 1}
-                      </span>
-                      <span className="text-[11px] text-slate-400">{stop.role}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs uppercase tracking-wide text-slate-400">
+                          Stop {index + 1}
+                        </span>
+                        <StopTypeBadge
+                          label={resolveStopTypeLabel(
+                            verticalTemplate,
+                            stop,
+                            'Unclassified'
+                          )}
+                        />
+                      </div>
                     </div>
                     <div className="space-y-1">
                       <div className="text-sm font-semibold text-slate-100">{stop.name}</div>
@@ -1669,7 +2817,7 @@ export default function CreatePlanClient({
             {readOnlyActionStrip}
             {showReadOnlyHint ? (
               <div className="text-[11px] text-amber-100/90">
-                Read-only here. Use "Open editor (Plan mode)" to edit.
+                Read-only here. Use {openEditorAction.label} to edit.
               </div>
             ) : null}
           </div>
@@ -1677,13 +2825,17 @@ export default function CreatePlanClient({
           <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-200 space-y-1">
             <div className="text-slate-300">Read-only preview</div>
             <div className="font-semibold text-slate-100">This is a template</div>
-            <p className="text-slate-400">Use it to start a new plan.</p>
+            <p className="text-slate-400">Start from this template to author a plan.</p>
           </div>
 
           <section className="space-y-2">
             <h2 className="text-sm font-semibold text-slate-200">Intent</h2>
             <p className="text-sm text-slate-200">{readOnlyIntent}</p>
           </section>
+
+          {guidanceBlock}
+
+          {experiencePackCard}
 
           <section className="space-y-4">
             <h2 className="text-sm font-semibold text-slate-200">Plan stops</h2>
@@ -1701,10 +2853,18 @@ export default function CreatePlanClient({
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-xs uppercase tracking-wide text-slate-400">
-                        Stop {index + 1}
-                      </span>
-                      <span className="text-[11px] text-slate-400">{stop.role}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs uppercase tracking-wide text-slate-400">
+                          Stop {index + 1}
+                        </span>
+                        <StopTypeBadge
+                          label={resolveStopTypeLabel(
+                            verticalTemplate,
+                            stop,
+                            'Unclassified'
+                          )}
+                        />
+                      </div>
                     </div>
                     <div className="space-y-1">
                       <div className="text-sm font-semibold text-slate-100">{stop.name}</div>
@@ -1739,7 +2899,16 @@ export default function CreatePlanClient({
     <main className="min-h-screen bg-slate-950 text-slate-50 px-4 py-8">
       <div className="max-w-2xl mx-auto space-y-8">
         <header className="space-y-1">
-          <h1 className="text-2xl font-semibold">Start a plan</h1>
+          <div className="space-y-1">
+            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">
+              Plan editor
+            </p>
+            <p className="text-[11px] text-slate-400">Draft / private</p>
+            <p className="text-xs text-slate-400">
+              You&apos;re planning now. Drafts stay private unless you choose to share.
+            </p>
+          </div>
+          <h1 className="text-2xl font-semibold">Create a plan</h1>
           <div className="text-[11px] text-slate-400">Mode: {uiModeLabel}</div>
           {sourceLabel ? (
             <div className="text-[11px] text-slate-500">{sourceLabel}</div>
@@ -1750,37 +2919,44 @@ export default function CreatePlanClient({
             </span>
           ) : null}
           <p className="text-sm text-slate-400">
-            Add a few stops, then save and share when it feels right.
+            Add a few stops, then save when it feels right.
           </p>
           {districtIndicator}
           <p className="text-xs text-slate-500">From: {originLabel}</p>
           {templateHelper ? <p className="text-xs text-slate-400">{templateHelper}</p> : null}
           {showCopyNotice ? (
             <p className="text-xs text-slate-400">
-              You're editing your version of this plan.
+              You&apos;re editing your version of this plan.
             </p>
           ) : null}
           {discoveryContextLine ? (
             <p className="text-xs text-slate-500">{discoveryContextLine}</p>
           ) : null}
           {!fromEncoded ? (
-            <p className="text-xs text-slate-500">You're editing your Waypoint.</p>
+            <p className="text-xs text-slate-500">You&apos;re editing your Waypoint.</p>
           ) : null}
-          {!isReadOnly && backAction ? (
+          {!isReadOnly && backAction && !(fromEncoded && canEdit) ? (
             <div className="flex flex-wrap items-center gap-2">
               <Link
                 href={backAction.href}
                 scroll={false}
                 onClick={backAction.onClick}
-                className="inline-flex items-center gap-1 rounded-full border border-slate-700/80 bg-slate-900/70 px-2 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500 hover:text-slate-50"
+                className="text-xs font-semibold text-slate-300 hover:text-slate-100"
               >
                 {backAction.label}
               </Link>
+              <span className="text-[11px] text-slate-500">Returns to browsing.</span>
             </div>
           ) : null}
         </header>
 
         {invalidFromNotice}
+
+        <VerticalIdentityHeader verticalTemplate={verticalTemplate} />
+
+        {guidanceBlock}
+
+        {experiencePackCard}
 
         {isReadOnly ? (
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100 space-y-2">
@@ -1788,7 +2964,7 @@ export default function CreatePlanClient({
             {readOnlyActionStrip}
             {showReadOnlyHint ? (
               <div className="text-[11px] text-amber-100/90">
-                Read-only here. Use "Open editor (Plan mode)" to edit.
+                Read-only here. Use {openEditorAction.label} to edit.
               </div>
             ) : null}
           </div>
@@ -1826,21 +3002,23 @@ export default function CreatePlanClient({
                 onClick={() => setShowTemplateConfirmation(false)}
                 className={`${ctaClass('primary')} text-[11px]`}
               >
-                Edit plan
+                Keep editing
               </button>
               {templatePreviewHref ? (
                 <Link href={templatePreviewHref} className={`${ctaClass('chip')} text-[11px]`}>
                   View template
                 </Link>
               ) : null}
-              <button
-                type="button"
-                onClick={handleCopyShare}
-                className={`${ctaClass('chip')} text-[11px]`}
-                disabled={!encodedFullUrl}
-              >
-                Copy share link
-              </button>
+              {SHARE_ENABLED ? (
+                <button
+                  type="button"
+                  onClick={handleCopyShare}
+                  className={`${ctaClass('chip')} text-[11px]`}
+                  disabled={!encodedFullUrl}
+                >
+                  Copy link
+                </button>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -1849,14 +3027,18 @@ export default function CreatePlanClient({
           <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <span>
-                You're editing a copy of{' '}
+                You&apos;re editing your version of{' '}
                 <span className="font-semibold text-slate-50">
                   {sourceTitle ?? 'Unknown plan'}
                 </span>
-                . Changes here won't affect the original.
+                . Changes here won&apos;t affect the original.
               </span>
               <div className="flex items-center gap-3 text-[11px]">
-                <button type="button" onClick={handleReturnToOriginal} className={ctaClass('chip')}>
+                <button
+                  type="button"
+                  onClick={handleReturnToOriginal}
+                  className="text-slate-300 hover:text-slate-100"
+                >
                   Back to original
                 </button>
               </div>
@@ -1866,20 +3048,160 @@ export default function CreatePlanClient({
 
         <section className="space-y-3">
           <div className="space-y-1">
-            <h2 className="text-sm font-semibold text-slate-200">Start with a plan style</h2>
+            <h2 className="text-sm font-semibold text-slate-200">Start from...</h2>
             <p className="text-[11px] text-slate-500">
-              {waysToBeginContext ??
-                'Choose a starting option. It just helps you begin and you can change anything.'}
+              {waysToBeginContext ?? 'Choose a starting point. You can change anything.'}
             </p>
           </div>
+
+          <div className="space-y-2">
+            <div className="flex flex-col gap-3 sm:max-w-xs">
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Toolkit
+                </label>
+                <select
+                  value={selectedToolkitId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setSelectedToolkitId(nextId);
+                    applyPlanUpdate('template:vertical_toolkit', (prev) =>
+                      setPlanTemplateId(prev, nextId === 'generic' ? undefined : nextId)
+                    );
+                  }}
+                  disabled={isReadOnly}
+                  className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {toolkitOptions.map((toolkit) => (
+                    <option key={toolkit.id} value={toolkit.id}>
+                      {toolkit.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-slate-500">Sets stop types + guidance.</p>
+              </div>
+
+              {selectedToolkitId === 'idea-date' || selectedPackId ? (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Starter pack
+                    </label>
+                    <span className="rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[10px] text-slate-400">
+                      Optional
+                    </span>
+                  </div>
+                  <select
+                    value={selectedTemplateId}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setSelectedPackId(nextId);
+                      handleTemplatePresetSelection({
+                        templateId: nextId,
+                        templateName: getTemplateV2ById(nextId)?.name,
+                        applyToPlan: false,
+                        allowVertical: true,
+                        source: 'dropdown',
+                      });
+                    }}
+                    disabled={isReadOnly}
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {TEMPLATES_V2.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-500">Prefills a draft (optional).</p>
+                </div>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const hasOriginSource =
+                    initialOrigin?.entityId ||
+                    initialOrigin?.entityName ||
+                    initialOrigin?.query ||
+                    initialOrigin?.mood ||
+                    initialOrigin?.source;
+                  const origin =
+                    initialOrigin && hasOriginSource
+                      ? buildOriginFromContext({
+                          entityId: initialOrigin.entityId,
+                          label: initialOrigin.entityName,
+                          query: initialOrigin.query,
+                          mood: initialOrigin.mood,
+                          source:
+                            initialOrigin.source === 'home_search'
+                              ? 'search'
+                              : (initialOrigin.source as PlanOriginKind | undefined),
+                        })
+                      : buildOriginFromContext(discoveryContext);
+                    const next = createTemplateSeedPlan({
+                      templateId: selectedTemplateId,
+                      origin,
+                      baseTitle: 'New plan',
+                      baseIntent: 'What do we want to accomplish?',
+                      baseAudience: 'me-and-friends',
+                      applyVerticalPreset: false,
+                    });
+                    applyPlanUpdate('template:blank', () => next);
+                  }}
+                disabled={isReadOnly}
+                className={`${ctaClass(
+                  'chip'
+                )} min-w-[220px] text-left text-xs bg-slate-900/80 border-slate-600 disabled:opacity-60 disabled:cursor-not-allowed`}
+              >
+                <div className="font-semibold text-slate-100">Start from scratch</div>
+                <p className="text-[11px] text-slate-400">
+                  No guidance, just the default blank plan.
+                </p>
+              </button>
+              {PLAN_TEMPLATES.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => {
+                    handleTemplatePresetSelection({
+                      templateId: tpl.id,
+                      templateName: tpl.label,
+                      applyToPlan: true,
+                      allowVertical: true,
+                      source: 'button',
+                    });
+                  }}
+                  disabled={isReadOnly}
+                  className={`${ctaClass(
+                    'chip'
+                  )} min-w-[200px] text-left text-xs disabled:opacity-60 disabled:cursor-not-allowed`}
+                >
+                  <div className="font-semibold text-slate-100">{tpl.label}</div>
+                  {tpl.description ? (
+                    <p className="text-[11px] text-slate-400">{tpl.description}</p>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+            {PLAN_TEMPLATES.length === 0 ? (
+              <div className="text-[11px] text-slate-500">
+                No templates yet — save a plan as a template to reuse later.
+              </div>
+            ) : null}
+          </div>
+
+          {!showVariations && fromEncoded ? (
+            <div className="text-[11px] text-slate-500">
+              Starter ideas will appear here when available.
+            </div>
+          ) : null}
 
           {showVariations && variationOptions.length > 0 && (
             <div className="space-y-2 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-3">
               <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-slate-100">Quick tweaks for this plan</p>
-                  <p className="text-[11px] text-slate-500">Small adjustments before you share.</p>
-                </div>
+                <p className="text-xs font-semibold text-slate-300">Starter ideas</p>
                 <button
                   type="button"
                   onClick={handleDismissVariations}
@@ -1905,7 +3227,7 @@ export default function CreatePlanClient({
                           'primary'
                         )} text-[11px] disabled:opacity-60 disabled:cursor-not-allowed`}
                       >
-                        Use this idea
+                        Start from this idea
                       </button>
                       <button
                         type="button"
@@ -1920,97 +3242,6 @@ export default function CreatePlanClient({
               </div>
             </div>
           )}
-
-          <div className="space-y-2">
-            <div className="flex flex-wrap gap-2">
-              {PLAN_TEMPLATES.map((tpl) => (
-                <button
-                  key={tpl.id}
-                  type="button"
-                  onClick={() => {
-                    const next = createPlanFromTemplate(tpl.prefill);
-                    const origin = {
-                      kind: 'template' as const,
-                      query: discoveryContext.query,
-                      mood: discoveryContext.mood,
-                      label: tpl.label,
-                      entityId: tpl.id,
-                    };
-                    next.meta = {
-                      ...next.meta,
-                      origin,
-                    };
-                    next.origin = origin;
-                    applyPlanUpdate('template:select', () => next);
-                  }}
-                  disabled={isReadOnly}
-                  className={`${ctaClass(
-                    'chip'
-                  )} min-w-[200px] text-left text-xs disabled:opacity-60 disabled:cursor-not-allowed`}
-                >
-                  <div className="font-semibold text-slate-100">{tpl.label}</div>
-                  {tpl.description ? (
-                    <p className="text-[11px] text-slate-400">{tpl.description}</p>
-                  ) : null}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => {
-                  const next = createEmptyPlan({
-                    title: 'New plan',
-                    intent: 'What do we want to accomplish?',
-                    audience: 'me-and-friends',
-                  });
-                  const hasOriginSource =
-                    initialOrigin?.entityId ||
-                    initialOrigin?.entityName ||
-                    initialOrigin?.query ||
-                    initialOrigin?.mood ||
-                    initialOrigin?.source;
-                  const hasDiscoverySource =
-                    discoveryContext.query ||
-                    discoveryContext.mood ||
-                    discoveryContext.source ||
-                    discoveryContext.entityId ||
-                    discoveryContext.label;
-                  const origin =
-                    initialOrigin && hasOriginSource
-                      ? buildOriginFromContext({
-                          entityId: initialOrigin.entityId,
-                          label: initialOrigin.entityName,
-                          query: initialOrigin.query,
-                          mood: initialOrigin.mood,
-                          source:
-                            initialOrigin.source === 'home_search'
-                              ? 'search'
-                              : (initialOrigin.source as PlanOriginKind | undefined),
-                        })
-                      : buildOriginFromContext(discoveryContext);
-                  if (origin) {
-                    const nextTitle =
-                      next.title === 'New plan' && origin.label ? origin.label : next.title;
-                    next.title = nextTitle;
-                    next.meta = {
-                      ...next.meta,
-                      origin,
-                    };
-                    next.origin = origin;
-                  }
-                  applyPlanUpdate('template:blank', () => next);
-                }}
-                disabled={isReadOnly}
-                className={`${ctaClass(
-                  'chip'
-                )} min-w-[200px] text-left text-xs disabled:opacity-60 disabled:cursor-not-allowed`}
-              >
-                <div className="font-semibold text-slate-100">Start from scratch</div>
-                <p className="text-[11px] text-slate-400">
-                  No guidance, just the default blank plan.
-                </p>
-              </button>
-            </div>
-          </div>
         </section>
 
         <section className="space-y-4">
@@ -2108,9 +3339,18 @@ export default function CreatePlanClient({
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs uppercase tracking-wide text-slate-400">
-                      Stop {index + 1}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs uppercase tracking-wide text-slate-400">
+                        Stop {index + 1}
+                      </span>
+                      <StopTypeBadge
+                        label={resolveStopTypeLabel(
+                          verticalTemplate,
+                          stop,
+                          'Unclassified'
+                        )}
+                      />
+                    </div>
                     <button
                       type="button"
                       onClick={() => removeStop(stop.id)}
@@ -2124,11 +3364,6 @@ export default function CreatePlanClient({
                   </div>
 
                   <div className="flex gap-2 text-[11px] text-slate-200">
-                    {stop.role === 'anchor' && (
-                      <span className="inline-flex items-center rounded-full border border-sky-500/60 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-100">
-                        Anchor
-                      </span>
-                    )}
                     <button
                       type="button"
                       onClick={() => moveStopUp(index)}
@@ -2215,10 +3450,18 @@ export default function CreatePlanClient({
                         value={stop.role}
                         disabled={isReadOnly}
                         onChange={(e) =>
-                          updateStop(stop.id, (prev) => ({
-                            ...prev,
-                            role: e.target.value as Stop['role'],
-                          }))
+                          updateStop(stop.id, (prev) => {
+                            const nextRole = e.target.value as Stop['role'];
+                            const canSetStopType =
+                              verticalTemplate?.stopTypes.some(
+                                (stopType) => stopType.id === nextRole
+                              ) ?? false;
+                            return {
+                              ...prev,
+                              role: nextRole,
+                              stop_type_id: canSetStopType ? nextRole : prev.stop_type_id,
+                            };
+                          })
                         }
                         className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
                       >
@@ -2299,7 +3542,7 @@ export default function CreatePlanClient({
           <div className="space-y-2">
             {!isReadOnly && !isCommitted && (
               <div className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5 text-[11px] text-slate-300">
-                Not saved yet
+                Draft (private)
               </div>
             )}
             <div className="flex flex-wrap items-center gap-2">
@@ -2312,7 +3555,7 @@ export default function CreatePlanClient({
                     isTemplatePrimary ? 'chip' : 'primary'
                   )} text-[11px] disabled:opacity-60`}
                 >
-                  {isCommitted ? 'Saved' : 'Save plan to Waypoints'}
+                  {isCommitted ? 'Saved' : 'Save plan'}
                 </button>
               ) : null}
               {!isReadOnly && userId ? (
@@ -2334,7 +3577,7 @@ export default function CreatePlanClient({
                   className={`${ctaClass('chip')} text-[11px]`}
                   disabled={!encodedPath}
                 >
-                  Preview share link
+                  Preview link
                 </button>
               ) : null}
               {SHARE_ENABLED ? (
@@ -2344,7 +3587,7 @@ export default function CreatePlanClient({
                   className={`${ctaClass(isReadOnly ? 'primary' : 'chip')} text-[11px]`}
                   disabled={!encodedFullUrl}
                 >
-                  Share this version
+                  Copy link
                 </button>
               ) : null}
               {SHARE_ENABLED && hasShared ? (
@@ -2361,10 +3604,10 @@ export default function CreatePlanClient({
             </div>
           </div>
           <p className="text-[11px] text-slate-500">
-            This plan will appear in Your Waypoints once you commit it.
+            Save creates a Waypoint you can reopen later.
           </p>
           <p className="text-xs text-slate-400">
-            Shared links are read-only snapshots for coordination - come back anytime to edit and re-share.
+            Saved plans can be edited anytime.
           </p>
           <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-3 space-y-3">
             <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Presentation</div>
@@ -2382,7 +3625,7 @@ export default function CreatePlanClient({
                   placeholder="Your name or org"
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
                 />
-                <p className="text-[11px] text-slate-500">Shown on share/embed.</p>
+                <p className="text-[11px] text-slate-500">Shown on read-only views.</p>
               </div>
               <div className="space-y-1">
                 <label className="text-xs text-slate-200" htmlFor="presentation-logoUrl">
@@ -2423,13 +3666,13 @@ export default function CreatePlanClient({
                     </option>
                   ))}
                 </select>
-                <p className="text-[11px] text-slate-500">Subtle highlight color for share/embed.</p>
+                <p className="text-[11px] text-slate-500">Subtle highlight color for read-only views.</p>
               </div>
             </div>
           </div>
           <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs space-y-1">
             {validation.issues.length === 0 ? (
-              <div className="text-emerald-200 font-semibold">Ready to share</div>
+              <div className="text-emerald-200 font-semibold">Plan ready</div>
             ) : (
               <>
                 <div className="text-amber-200 font-semibold">

@@ -33,6 +33,11 @@ function formatOrigin(origin?: PlanOrigin | null): string | null {
     case 'template':
       if (label) return `Template "${label}"`;
       return 'Template';
+    case 'curated':
+      if (label) return `Curated "${label}"`;
+      return 'Curated';
+    case 'unknown':
+      return label ?? 'Waypoint';
     default:
       if (label) return label;
       return 'Waypoint';

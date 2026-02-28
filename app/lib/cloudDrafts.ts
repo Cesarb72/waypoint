@@ -11,6 +11,7 @@ export type CloudDraftRow = {
 
 type Ok<T> = { ok: true } & T;
 type Err = { ok: false; error: string };
+type OkEmpty = { ok: true };
 
 const draftIdCache = new Map<string, Promise<string>>();
 
@@ -101,7 +102,7 @@ export async function upsertCloudDraft(
   draftKey: string,
   plan: Plan,
   userId: string
-): Promise<Ok<{}> | Err> {
+): Promise<OkEmpty | Err> {
   try {
     const supabase = getSupabaseBrowserClient();
     const identity = await buildDraftIdentity(draftKey);
@@ -121,7 +122,7 @@ export async function upsertCloudDraft(
 export async function clearCloudDraft(
   draftKey: string,
   userId: string
-): Promise<Ok<{}> | Err> {
+): Promise<OkEmpty | Err> {
   try {
     const supabase = getSupabaseBrowserClient();
     const { id } = await buildDraftIdentity(draftKey);

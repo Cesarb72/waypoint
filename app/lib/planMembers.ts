@@ -21,6 +21,7 @@ const ROLE_LOOKUP_COOLDOWN_MS = 30000;
 
 type Ok<T> = { ok: true } & T;
 type Err = { ok: false; error: string };
+type OkEmpty = { ok: true };
 
 function normalizeError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -86,7 +87,7 @@ export async function addMember(
   planId: string,
   userId: string,
   role: PlanMemberRole
-): Promise<Ok<{}> | Err> {
+): Promise<OkEmpty | Err> {
   try {
     const supabase = getSupabaseBrowserClient();
     const { error } = await supabase.from('plan_members').insert({
@@ -104,7 +105,7 @@ export async function addMember(
 export async function removeMember(
   planId: string,
   userId: string
-): Promise<Ok<{}> | Err> {
+): Promise<OkEmpty | Err> {
   try {
     const supabase = getSupabaseBrowserClient();
     const { error } = await supabase

@@ -23,7 +23,7 @@ export default function AuthPanel() {
       typeof window !== 'undefined'
         ? `${window.location.origin}${window.location.pathname}${window.location.search}${window.location.hash ?? ''}`
         : undefined;
-    const { data, error } = await supabase.auth.signInWithOtp({
+    const { error } = await supabase.auth.signInWithOtp({
       email: trimmedEmail,
       options: { emailRedirectTo: redirectTo },
     });

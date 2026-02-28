@@ -1,8 +1,9 @@
 'use client';
 
-import { createContext, useContext, useMemo } from 'react';
+import { createContext, useContext, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { DEFAULT_ENTRY_MODE, isEntryMode, type EntryMode } from '../lib/entryMode';
+import { initVerticals } from '../lib/verticals/init';
 
 type EntryModeState = {
   mode: EntryMode;
@@ -20,6 +21,9 @@ export function EntryModeProvider({ children }: { children: React.ReactNode }) {
   );
   const isReadOnly = mode !== 'plan';
   const value = useMemo(() => ({ mode, isReadOnly }), [mode, isReadOnly]);
+  useEffect(() => {
+    initVerticals();
+  }, []);
   return <EntryModeContext.Provider value={value}>{children}</EntryModeContext.Provider>;
 }
 

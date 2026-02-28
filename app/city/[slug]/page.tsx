@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ctaClass } from '../../ui/cta';
 import { DEFAULT_ENTRY_MODE, isEntryMode, withPreservedModeParam } from '../../lib/entryMode';
-import { CITIES, getCityBySlug, getDistrictsForCity } from '../../data/cityDistricts';
+import { getCityBySlug, getDistrictsForCity } from '../../data/cityDistricts';
 
 type PageProps = {
   params: Promise<{ slug: string }>;

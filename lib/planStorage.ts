@@ -1,4 +1,5 @@
 // lib/planStorage.ts
+import type { PlanSignals } from '@/app/plan-engine';
 export type StoredStop = {
   id: string;
   label: string;
@@ -16,6 +17,8 @@ export type StoredPlan = {
   notes?: string;
   stops?: StoredStop[];
   location?: string;
+  planSignals?: PlanSignals;
+  // Legacy signal fields kept for backward compatibility.
   chosen?: boolean;
   chosenAt?: string | null;
   completed?: boolean | null;
@@ -31,6 +34,74 @@ type UpsertInput = Omit<StoredPlan, 'id' | 'createdAt' | 'updatedAt' | 'dateTime
 };
 
 const STORAGE_KEY = 'waypoint.plans';
+const DEFAULT_PLAN_SIGNALS: PlanSignals = {
+  chosen: false,
+  chosenAt: null,
+  completed: false,
+  completedAt: null,
+  skipped: false,
+  skippedAt: null,
+  revisitedCount: 0,
+  revisitedAt: [],
+  sentiment: null,
+  sentimentAt: undefined,
+  feedbackNotes: null,
+};
+
+function enforceOutcomeExclusivity(signals: PlanSignals): PlanSignals {
+  if (signals.completed) {
+    return { ...signals, skipped: false };
+  }
+  if (signals.skipped) {
+    return { ...signals, completed: false };
+  }
+  return signals;
+}
+
+function mapLegacySentiment(
+  sentiment?: StoredPlan['sentiment'] | null
+): PlanSignals['sentiment'] {
+  if (!sentiment) return null;
+  if (sentiment === 'good') return 'positive';
+  if (sentiment === 'meh') return 'neutral';
+  if (sentiment === 'bad') return 'negative';
+  return null;
+}
+
+function normalizePlanSignals(plan: StoredPlan): PlanSignals {
+  const legacySentiment = mapLegacySentiment(plan.sentiment);
+  const normalized: PlanSignals = {
+    ...DEFAULT_PLAN_SIGNALS,
+    ...plan.planSignals,
+    chosen: plan.planSignals?.chosen ?? plan.chosen ?? DEFAULT_PLAN_SIGNALS.chosen,
+    chosenAt: plan.planSignals?.chosenAt ?? plan.chosenAt ?? DEFAULT_PLAN_SIGNALS.chosenAt,
+    completed: plan.planSignals?.completed ?? plan.completed ?? DEFAULT_PLAN_SIGNALS.completed,
+    completedAt: plan.planSignals?.completedAt ?? plan.completedAt ?? DEFAULT_PLAN_SIGNALS.completedAt,
+    skipped: plan.planSignals?.skipped ?? DEFAULT_PLAN_SIGNALS.skipped,
+    skippedAt: plan.planSignals?.skippedAt ?? DEFAULT_PLAN_SIGNALS.skippedAt,
+    revisitedCount: plan.planSignals?.revisitedCount ?? DEFAULT_PLAN_SIGNALS.revisitedCount,
+    revisitedAt: plan.planSignals?.revisitedAt ?? DEFAULT_PLAN_SIGNALS.revisitedAt,
+    sentiment:
+      plan.planSignals?.sentiment ??
+      legacySentiment ??
+      DEFAULT_PLAN_SIGNALS.sentiment,
+    sentimentAt: plan.planSignals?.sentimentAt ?? DEFAULT_PLAN_SIGNALS.sentimentAt,
+    feedbackNotes:
+      plan.planSignals?.feedbackNotes ??
+      plan.feedbackNotes ??
+      DEFAULT_PLAN_SIGNALS.feedbackNotes,
+  };
+  return enforceOutcomeExclusivity(normalized);
+}
+
+function normalizeStoredPlan(plan: StoredPlan): StoredPlan {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- omit legacy fields
+  const { chosen, chosenAt, completed, completedAt, sentiment, feedbackNotes, ...rest } = plan;
+  return {
+    ...rest,
+    planSignals: normalizePlanSignals(plan),
+  };
+}
 
 function hasLocalStorage(): boolean {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -43,7 +114,7 @@ function readPlans(): StoredPlan[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed as StoredPlan[];
+    return (parsed as StoredPlan[]).map((plan) => normalizeStoredPlan(plan));
   } catch {
     return [];
   }
@@ -95,13 +166,14 @@ export function upsertPlan(input: UpsertInput): StoredPlan {
   const existing = existingIdx >= 0 ? plans[existingIdx] : null;
   const createdAt = existing?.createdAt ?? now;
 
-  const next: StoredPlan = withDateTime({
+  const merged: StoredPlan = {
     ...existing,
     ...input,
     id,
     createdAt,
     updatedAt: now,
-  });
+  };
+  const next = withDateTime(normalizeStoredPlan(merged));
 
   if (existingIdx >= 0) {
     plans[existingIdx] = next;
@@ -137,10 +209,14 @@ export function updatePlanChosen(
   if (idx === -1) return null;
 
   const existing = plans[idx];
-  const next: StoredPlan = {
-    ...existing,
+  const nextSignals = {
+    ...normalizePlanSignals(existing),
     chosen,
     chosenAt,
+  };
+  const next: StoredPlan = {
+    ...normalizeStoredPlan(existing),
+    planSignals: nextSignals,
   };
 
   plans[idx] = next;
@@ -150,18 +226,42 @@ export function updatePlanChosen(
 
 export function updatePlanOutcome(
   id: string,
-  completed: boolean | null,
-  completedAt: string | null
+  outcome: 'completed' | 'skipped' | 'clear'
 ): StoredPlan | null {
   const plans = readPlans();
   const idx = plans.findIndex((plan) => plan.id === id);
   if (idx === -1) return null;
 
   const existing = plans[idx];
+  const base = normalizePlanSignals(existing);
+  const now = new Date().toISOString();
+  const nextSignals =
+    outcome === 'completed'
+      ? {
+          ...base,
+          completed: true,
+          completedAt: now,
+          skipped: false,
+          skippedAt: null,
+        }
+      : outcome === 'skipped'
+      ? {
+          ...base,
+          completed: false,
+          completedAt: null,
+          skipped: true,
+          skippedAt: now,
+        }
+      : {
+          ...base,
+          completed: false,
+          completedAt: null,
+          skipped: false,
+          skippedAt: null,
+        };
   const next: StoredPlan = {
-    ...existing,
-    completed,
-    completedAt,
+    ...normalizeStoredPlan(existing),
+    planSignals: nextSignals,
   };
 
   plans[idx] = next;
@@ -171,16 +271,20 @@ export function updatePlanOutcome(
 
 export function updatePlanSentiment(
   id: string,
-  sentiment: 'good' | 'meh' | 'bad' | null
+  sentiment: PlanSignals['sentiment']
 ): StoredPlan | null {
   const plans = readPlans();
   const idx = plans.findIndex((plan) => plan.id === id);
   if (idx === -1) return null;
 
   const existing = plans[idx];
-  const next: StoredPlan = {
-    ...existing,
+  const nextSignals = {
+    ...normalizePlanSignals(existing),
     sentiment,
+  };
+  const next: StoredPlan = {
+    ...normalizeStoredPlan(existing),
+    planSignals: nextSignals,
   };
 
   plans[idx] = next;
@@ -197,9 +301,35 @@ export function updatePlanFeedbackNotes(
   if (idx === -1) return null;
 
   const existing = plans[idx];
-  const next: StoredPlan = {
-    ...existing,
+  const nextSignals = {
+    ...normalizePlanSignals(existing),
     feedbackNotes,
+  };
+  const next: StoredPlan = {
+    ...normalizeStoredPlan(existing),
+    planSignals: nextSignals,
+  };
+
+  plans[idx] = next;
+  writePlans(plans);
+  return withDateTime(next);
+}
+
+export function updatePlanRevisited(id: string, revisitedAt?: string): StoredPlan | null {
+  const plans = readPlans();
+  const idx = plans.findIndex((plan) => plan.id === id);
+  if (idx === -1) return null;
+
+  const existing = plans[idx];
+  const nextSignals = normalizePlanSignals(existing);
+  const timestamp = revisitedAt ?? new Date().toISOString();
+  const next: StoredPlan = {
+    ...normalizeStoredPlan(existing),
+    planSignals: {
+      ...nextSignals,
+      revisitedCount: nextSignals.revisitedCount + 1,
+      revisitedAt: [...nextSignals.revisitedAt, timestamp],
+    },
   };
 
   plans[idx] = next;
