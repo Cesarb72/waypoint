@@ -1,0 +1,200 @@
+[
+  {
+    "placeId": "local_cedar_court_cafe",
+    "name": "Cedar Court Cafe",
+    "lat": 37.7884,
+    "lng": -122.4064,
+    "types": ["cafe", "coffee_shop"],
+    "priceLevel": 2,
+    "editorialSummary": "Warm coffee bar with low-key table service.",
+    "roles": ["start", "flex"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_booklane_parlor",
+    "name": "Booklane Parlor",
+    "lat": 37.7878,
+    "lng": -122.4053,
+    "types": ["book_store", "cafe"],
+    "priceLevel": 2,
+    "editorialSummary": "Independent shelves and quiet espresso corners.",
+    "roles": ["start", "main"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_mint_bakery_bar",
+    "name": "Mint Bakery Bar",
+    "lat": 37.7895,
+    "lng": -122.4048,
+    "types": ["bakery", "cafe"],
+    "priceLevel": 1,
+    "editorialSummary": "Counter pastries and easy, short first-stop pacing.",
+    "roles": ["start", "flex"],
+    "vibes": ["first_date_low_pressure"]
+  },
+  {
+    "placeId": "local_foundry_gallery_hall",
+    "name": "Foundry Gallery Hall",
+    "lat": 37.7871,
+    "lng": -122.4021,
+    "types": ["art_gallery", "museum"],
+    "priceLevel": 2,
+    "editorialSummary": "Modern exhibitions with room to wander.",
+    "roles": ["main"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_civic_still_life_museum",
+    "name": "Civic Still Life Museum",
+    "lat": 37.7864,
+    "lng": -122.4014,
+    "types": ["museum"],
+    "priceLevel": 3,
+    "editorialSummary": "Intimate galleries with timed evening entry.",
+    "roles": ["main"],
+    "vibes": ["anniversary_intimate"]
+  },
+  {
+    "placeId": "local_oak_row_bistro",
+    "name": "Oak Row Bistro",
+    "lat": 37.7889,
+    "lng": -122.4031,
+    "types": ["restaurant"],
+    "priceLevel": 3,
+    "editorialSummary": "Small plates and steady table cadence.",
+    "roles": ["main"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_harbor_supper_house",
+    "name": "Harbor Supper House",
+    "lat": 37.8034,
+    "lng": -122.4179,
+    "types": ["restaurant"],
+    "priceLevel": 4,
+    "editorialSummary": "Long-form dining with quieter seating nooks.",
+    "roles": ["main", "windDown"],
+    "vibes": ["anniversary_intimate"]
+  },
+  {
+    "placeId": "local_north_beach_jazz_room",
+    "name": "North Beach Jazz Room",
+    "lat": 37.8041,
+    "lng": -122.4188,
+    "types": ["bar", "live_music_venue"],
+    "priceLevel": 3,
+    "editorialSummary": "Late set times with lounge-style pacing.",
+    "roles": ["windDown"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_twilight_tea_house",
+    "name": "Twilight Tea House",
+    "lat": 37.8038,
+    "lng": -122.4197,
+    "types": ["tea_house", "dessert_shop"],
+    "priceLevel": 2,
+    "editorialSummary": "Soft-close tea flights and plated sweets.",
+    "roles": ["windDown"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_anchor_dessert_counter",
+    "name": "Anchor Dessert Counter",
+    "lat": 37.8029,
+    "lng": -122.4184,
+    "types": ["dessert_shop"],
+    "priceLevel": 2,
+    "editorialSummary": "Fast dessert service with mellow lighting.",
+    "roles": ["windDown", "flex"],
+    "vibes": ["first_date_low_pressure"]
+  },
+  {
+    "placeId": "local_juniper_square_cafe",
+    "name": "Juniper Square Cafe",
+    "lat": 37.7773,
+    "lng": -122.4244,
+    "types": ["cafe", "coffee_shop"],
+    "priceLevel": 2,
+    "editorialSummary": "Neighborhood cafe with conversational noise level.",
+    "roles": ["start", "flex"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_willow_lane_tea",
+    "name": "Willow Lane Tea",
+    "lat": 37.7784,
+    "lng": -122.4231,
+    "types": ["tea_house", "cafe"],
+    "priceLevel": 2,
+    "editorialSummary": "Cozy tea program ideal for a gentle close.",
+    "roles": ["start", "windDown"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_rowan_kitchen_room",
+    "name": "Rowan Kitchen Room",
+    "lat": 37.7779,
+    "lng": -122.4238,
+    "types": ["restaurant"],
+    "priceLevel": 3,
+    "editorialSummary": "Course pacing that supports a main-stop focus.",
+    "roles": ["main"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_fern_courtyard_gallery",
+    "name": "Fern Courtyard Gallery",
+    "lat": 37.7786,
+    "lng": -122.4227,
+    "types": ["art_gallery"],
+    "priceLevel": 2,
+    "editorialSummary": "Small rotating exhibits and short queue times.",
+    "roles": ["main", "flex"],
+    "vibes": ["first_date_low_pressure"]
+  },
+  {
+    "placeId": "local_mason_chocolate_lounge",
+    "name": "Mason Chocolate Lounge",
+    "lat": 37.7781,
+    "lng": -122.4235,
+    "types": ["dessert_shop", "cafe"],
+    "priceLevel": 2,
+    "editorialSummary": "Chocolate tasting flights in a quieter room.",
+    "roles": ["windDown"],
+    "vibes": ["first_date_low_pressure", "anniversary_intimate"]
+  },
+  {
+    "placeId": "local_orchard_patissier",
+    "name": "Orchard Patissier",
+    "lat": 37.7776,
+    "lng": -122.4229,
+    "types": ["dessert_shop", "bakery"],
+    "priceLevel": 2,
+    "editorialSummary": "Pastry-forward close with low-pressure service.",
+    "roles": ["windDown", "flex"],
+    "vibes": ["first_date_low_pressure"]
+  },
+  {
+    "placeId": "local_mission_ceramics_house",
+    "name": "Mission Ceramics House",
+    "lat": 37.7602,
+    "lng": -122.4212,
+    "types": ["art_gallery", "store"],
+    "priceLevel": 2,
+    "editorialSummary": "Hands-on displays and compact browsing flow.",
+    "roles": ["main", "flex"],
+    "vibes": ["first_date_low_pressure"]
+  },
+  {
+    "placeId": "local_sunset_boardwalk_cafe",
+    "name": "Sunset Boardwalk Cafe",
+    "lat": 37.7682,
+    "lng": -122.5104,
+    "types": ["cafe"],
+    "priceLevel": 2,
+    "editorialSummary": "Scenic but distance-heavy option for contrast testing.",
+    "roles": ["start", "flex"],
+    "vibes": ["first_date_low_pressure"]
+  }
+]

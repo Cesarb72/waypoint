@@ -1,6 +1,19 @@
-import { PLAN_VERSION, type Plan, type ShareMode } from './types';
+import { PLAN_VERSION, type Plan, type PlanSignals, type ShareMode } from './types';
 
 const DEFAULT_SHARE_MODES: ShareMode[] = ['link', 'qr', 'embed'];
+const DEFAULT_PLAN_SIGNALS: PlanSignals = {
+  chosen: false,
+  chosenAt: null,
+  completed: false,
+  completedAt: null,
+  skipped: false,
+  skippedAt: null,
+  revisitedCount: 0,
+  revisitedAt: [],
+  sentiment: null,
+  sentimentAt: undefined,
+  feedbackNotes: null,
+};
 
 export const defaultPlan: Plan = {
   id: '',
@@ -9,6 +22,7 @@ export const defaultPlan: Plan = {
   intent: '',
   audience: '',
   stops: [],
+  planSignals: { ...DEFAULT_PLAN_SIGNALS },
   presentation: {
     shareModes: [...DEFAULT_SHARE_MODES],
   },
@@ -59,6 +73,7 @@ export function createPlanFromTemplate(templatePlan: Partial<Plan>): Plan {
             : [...DEFAULT_SHARE_MODES],
         }
       : { shareModes: [...DEFAULT_SHARE_MODES] },
+    brand: templatePlan.brand ? { ...templatePlan.brand } : undefined,
     isTemplate: false,
     templateMeta: undefined,
     createdFrom: templatePlan.createdFrom,
