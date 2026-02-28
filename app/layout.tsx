@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Suspense } from "react";
 import "./globals.css";
 import { SessionProvider } from "./auth/SessionProvider";
@@ -19,7 +20,26 @@ export default function RootLayout({
       <body className="font-sans antialiased">
         <Suspense fallback={null}>
           <EntryModeProvider>
-            <SessionProvider>{children}</SessionProvider>
+            <SessionProvider>
+              <div className="min-h-screen bg-slate-950 text-slate-50">
+                <header className="border-b border-slate-800 bg-slate-950/95">
+                  <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-3">
+                    <Link href="/" className="text-sm font-semibold text-slate-100 hover:text-white">
+                      Waypoint
+                    </Link>
+                    <nav className="flex items-center gap-4 text-sm">
+                      <Link href="/toolkits" className="text-slate-300 hover:text-slate-100">
+                        Toolkits
+                      </Link>
+                      <Link href="/idea-date" className="text-slate-300 hover:text-slate-100">
+                        Idea-Date
+                      </Link>
+                    </nav>
+                  </div>
+                </header>
+                {children}
+              </div>
+            </SessionProvider>
           </EntryModeProvider>
         </Suspense>
       </body>

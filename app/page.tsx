@@ -4,8 +4,7 @@ type ToolkitTile = {
   name: string;
   description: string;
   status: 'active' | 'coming-soon';
-  href?: string;
-  cta?: string;
+  ideaDateHref?: string;
 };
 
 type QuickLink = {
@@ -19,8 +18,7 @@ const toolkitTiles: ToolkitTile[] = [
     name: 'Concierge Toolkit',
     description: 'Active lens for engine-guided date plan coordination.',
     status: 'active',
-    href: '/idea-date',
-    cta: 'Try Idea-Date',
+    ideaDateHref: '/idea-date',
   },
   {
     name: 'Restaurants & hospitality',
@@ -66,19 +64,23 @@ const quickLinks: QuickLink[] = [
   },
   {
     label: 'Plans / Recent plans',
-    note: 'No /plans index route exists yet.',
+    note: 'Coming soon',
   },
   {
     label: 'Districts',
-    note: 'No /districts index route exists yet.',
+    href: '/districts',
   },
   {
     label: 'Templates',
-    note: 'No /templates route exists yet.',
+    note: 'Coming soon',
   },
   {
     label: 'Insights',
-    href: '/insights/heatmap',
+    href: '/insights',
+  },
+  {
+    label: 'Toolkits',
+    href: '/toolkits',
   },
   {
     label: 'Idea-Date',
@@ -96,9 +98,23 @@ export default function Page() {
             Waypoint
           </h1>
           <p className="mt-4 max-w-3xl text-sm text-slate-300 sm:text-base">
-            Waypoint is a coordination engine for multi-stop plans across verticals. Concierge is the
-            active toolkit today, with additional toolkits rolling out through configuration.
+            Waypoint is a coordination engine for multi-stop plans across verticals. Start with the
+            active concierge lens, then expand through toolkit configuration.
           </p>
+          <div className="mt-6 flex flex-wrap gap-2">
+            <Link
+              href="/toolkits"
+              className="inline-flex items-center rounded-md bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-white"
+            >
+              Browse Toolkits
+            </Link>
+            <Link
+              href="/idea-date"
+              className="inline-flex items-center rounded-md border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-500 hover:text-slate-100"
+            >
+              Try Idea-Date
+            </Link>
+          </div>
         </section>
 
         <section className="space-y-4">
@@ -116,14 +132,22 @@ export default function Page() {
                   <p className="text-sm font-medium text-slate-100">{tile.name}</p>
                   <p className="text-xs text-slate-400">{tile.description}</p>
                 </div>
-                <div className="mt-auto">
-                  {tile.status === 'active' && tile.href ? (
-                    <Link
-                      href={tile.href}
-                      className="inline-flex items-center rounded-md bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-white"
-                    >
-                      {tile.cta ?? 'Open'}
-                    </Link>
+                <div className="mt-auto flex flex-wrap gap-2">
+                  {tile.status === 'active' ? (
+                    <>
+                      <Link
+                        href="/toolkits/concierge"
+                        className="inline-flex items-center rounded-md border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-500 hover:text-slate-100"
+                      >
+                        Concierge Toolkit
+                      </Link>
+                      <Link
+                        href={tile.ideaDateHref ?? '/idea-date'}
+                        className="inline-flex items-center rounded-md bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-white"
+                      >
+                        Try Idea-Date
+                      </Link>
+                    </>
                   ) : (
                     <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-400">
                       Coming soon
@@ -155,7 +179,7 @@ export default function Page() {
                     Open {item.href}
                   </Link>
                 ) : (
-                  <p className="text-xs text-slate-500">{item.note ?? 'Route not available yet.'}</p>
+                  <p className="text-xs text-slate-500">{item.note ?? 'Coming soon'}</p>
                 )}
               </div>
             ))}
