@@ -1,4 +1,4 @@
-import type { Plan, Stop } from '@/app/plan-engine/types';
+import type { Plan, Stop } from '@/lib/core/planTypes';
 import { computeFatiguePenalty, computeFrictionPenalty, computeJourneyIntentScore, computeJourneyScore } from './scoring';
 import { getEdge, type IdeaDateTravelEdge } from './travelCache';
 import { parseIdeaDatePlanProfile, IdeaDateStopProfileSchema, type IdeaDateStopProfile } from './schemas';
@@ -73,3 +73,4 @@ export function evaluateIdeaDateJourney(plan: Plan): IdeaDateJourneyEvaluation {
     travelEdges,
   };
 }
+

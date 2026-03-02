@@ -1,4 +1,4 @@
-import type { Plan, Stop } from '@/app/plan-engine/types';
+import type { Plan, Stop } from '@/lib/core/planTypes';
 import type { IdeaDateRole } from './ideaDateConfig';
 import { buildArcModel, type IdeaDateArcModel } from './arcModel';
 import { computeArcContributionByStop } from './arcContribution';
@@ -295,12 +295,16 @@ async function resolvePlanInput(
   return resolved;
 }
 
+export type RecomputeIdeaDateLiveOptions = {
+  resolvePlanById?: (planId: string) => Plan | null | Promise<Plan | null>;
+  debug?: boolean;
+};
+
 export async function recomputeIdeaDateLive(
   planOrId: Plan | string,
-  options?: {
-    resolvePlanById?: (planId: string) => Plan | null | Promise<Plan | null>;
-  }
+  options?: RecomputeIdeaDateLiveOptions
 ): Promise<IdeaDateLiveResult> {
+  const debug = options?.debug ?? true;
   const resolvedPlan = await resolvePlanInput(planOrId, options);
   const ensuredPlan = ensureIdeaDateProfiles(resolvedPlan);
   const planProfile = getPlanProfile(ensuredPlan);
@@ -308,7 +312,7 @@ export async function recomputeIdeaDateLive(
   const stopProfiles = stops.map((stop, index) => {
     const existingProfile = getStopIdeaDateProfile(stop);
     if (existingProfile) return existingProfile;
-    if (process.env.NODE_ENV !== 'production') {
+    if (debug) {
       throw new Error(
         `Idea-Date recompute invariant failed: stop at index ${index} is missing ideaDate profile.`
       );
@@ -350,7 +354,7 @@ export async function recomputeIdeaDateLive(
     friction,
     transitionMinutes: travel.edges.map((edge) => edge.minutes),
   });
-  if (process.env.NODE_ENV !== 'production') {
+  if (debug) {
     if (arcContribution.byIndex.length !== stops.length) {
       throw new Error(
         `Idea-Date recompute invariant failed: arcContributionByIndex length=${arcContribution.byIndex.length}, stops=${stops.length}.`
@@ -401,3 +405,4 @@ export async function recomputeIdeaDateLive(
     arcModel,
   };
 }
+

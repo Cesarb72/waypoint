@@ -1,4 +1,4 @@
-import type { Plan } from '@/app/plan-engine/types';
+import type { Plan } from '@/lib/core/planTypes';
 import type { IdeaDateArcModel } from './arcModel';
 import { computeArcContributionByStop } from './arcContribution';
 import { applyIdeaDatePatchOps } from './patchOps';
@@ -29,9 +29,6 @@ import { IdeaDateStopProfileSchema } from './schemas';
 import { generateReorderSuggestion } from './reorder';
 import { sortByArcContributionDelta } from './suggestionRanking';
 import type { IdeaDateSuggestion } from './types';
-
-const debug = process.env.NODE_ENV !== 'production';
-const includeDevTiming = process.env.NODE_ENV !== 'production';
 
 export type IdeaDateSuggestionPack = {
   plan: Plan;
@@ -194,6 +191,7 @@ async function rankSuggestionsByArcContribution(input: {
   suggestions: IdeaDateSuggestion[];
   prefTilt?: Partial<IdeaDatePrefTilt>;
   mode?: IdeaDateMode;
+  debug?: boolean;
 }): Promise<RankedSuggestionRow[]> {
   if (input.suggestions.length === 0) return [];
   const tiltProfile = buildIdeaDateRefineTiltProfile(input.prefTilt, input.mode);
@@ -207,8 +205,8 @@ async function rankSuggestionsByArcContribution(input: {
 
   const rankedRows = await Promise.all(
     input.suggestions.map(async (suggestion, legacyRank) => {
-      const previewPlan = applyIdeaDatePatchOps(input.plan, suggestion.patchOps);
-      const previewLive = await recomputeIdeaDateLive(previewPlan);
+      const previewPlan = applyIdeaDatePatchOps(input.plan, suggestion.patchOps, { debug: input.debug });
+      const previewLive = await recomputeIdeaDateLive(previewPlan, { debug: input.debug });
       const constraintDelta = buildIdeaDateSuggestionConstraintDelta({
         baseline: {
           hardCount: input.computed.constraintHardCount,
@@ -289,10 +287,13 @@ export async function generateIdeaDateSuggestionPack(
     replacementRanking?: IdeaDateReplacementRankingOptions;
     prefTilt?: Partial<IdeaDatePrefTilt>;
     mode?: IdeaDateMode;
+    debug?: boolean;
   }
 ): Promise<IdeaDateSuggestionPack> {
+  const debug = options?.debug ?? true;
+  const includeDevTiming = debug;
   const refineStartedAt = nowMs();
-  const live = await recomputeIdeaDateLive(plan);
+  const live = await recomputeIdeaDateLive(plan, { debug });
   const reorder = generateReorderSuggestion(live.plan, live.computed);
   const replacementOutput = await generateReplacementSuggestionsWithStats(live.plan, live.computed, {
     searchCandidates: options?.searchCandidates,
@@ -300,6 +301,7 @@ export async function generateIdeaDateSuggestionPack(
     replacementRanking: options?.replacementRanking,
     prefTilt: options?.prefTilt,
     mode: options?.mode,
+    debug,
   });
   const replacements = replacementOutput.suggestions;
   const phaseISuggestions: IdeaDateSuggestion[] = [];
@@ -315,6 +317,7 @@ export async function generateIdeaDateSuggestionPack(
     suggestions: dedupedPhaseISuggestions,
     prefTilt: options?.prefTilt,
     mode: options?.mode,
+    debug,
   });
   const suggestionsWithStructuralNarrative = rankedSuggestions.map((row) => {
     const structuralNarrative = composeStructuralNarrativeDelta(row.structuralNarrativeInput);
@@ -352,3 +355,4 @@ export async function generateIdeaDateSuggestionPack(
     ...(debug ? { debugRefineStats: replacementOutput.refineStats } : {}),
   };
 }
+

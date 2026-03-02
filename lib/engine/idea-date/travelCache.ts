@@ -1,4 +1,4 @@
-import type { PlaceLite, PlaceRef } from '@/app/plan-engine/types';
+import type { PlaceLite, PlaceRef } from '@/lib/core/planTypes';
 import type { IdeaDateTravelMode } from './ideaDateConfig';
 import { estimateTravelMinutes, haversineDistanceM } from './travelEstimate';
 
@@ -105,3 +105,4 @@ export function getEdge(
 
   return { key, fromKey, toKey, mode, distanceM, minutes, cached: false };
 }
+

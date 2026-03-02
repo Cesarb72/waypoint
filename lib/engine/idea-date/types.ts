@@ -1,4 +1,4 @@
-import type { PlaceLite, PlaceRef, Plan } from '@/app/plan-engine/types';
+import type { PlaceLite, PlaceRef, Plan } from '@/lib/core/planTypes';
 import type { IdeaDateStopProfile } from './schemas';
 import type { IdeaDatePrefTilt } from './refineTilt';
 import type { IdeaDateSuggestionConstraintDelta } from './constraintsNarrative';
@@ -82,3 +82,4 @@ export type IdeaDateSuggestion = {
   preview?: boolean;
   subjectStopId?: string;
 };
+

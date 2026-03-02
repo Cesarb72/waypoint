@@ -1,4 +1,4 @@
-import type { PlaceLite, PlaceRef } from '@/app/plan-engine/types';
+import type { PlaceLite, PlaceRef } from '@/lib/core/planTypes';
 import {
   IDEA_DATE_INTENT_KEYS,
   createIntentVector,
@@ -134,3 +134,4 @@ export function hydrateIdeaDateStopProfile(input: {
     overrides: { chillLively: 0, relaxedActive: 0, quickLingering: 0 },
   });
 }
+

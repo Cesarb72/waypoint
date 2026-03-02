@@ -1,4 +1,4 @@
-import type { Plan } from '@/app/plan-engine/types';
+import type { Plan } from '@/lib/core/planTypes';
 import { IDEA_DATE_REORDER_DELTA_THRESHOLD } from './ideaDateConfig';
 import { evaluateIdeaDateJourney } from './evaluate';
 import type { IdeaDateComputedMetrics } from './recompute';
@@ -126,3 +126,4 @@ export function generateReorderSuggestion(
     subjectStopId: best.candidate.stopId,
   };
 }
+

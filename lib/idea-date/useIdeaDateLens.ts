@@ -183,7 +183,7 @@ export function stablePatchOpsSignature(patchOps: IdeaDateSuggestion['patchOps']
 
 function buildReorderFinalOrderSignature(plan: Plan, patchOps: IdeaDateSuggestion['patchOps']): string | null {
   try {
-    const nextPlan = applyIdeaDateOps(plan, patchOps);
+    const nextPlan = applyIdeaDateOps(plan, patchOps, { debug: isDevelopment });
     return (nextPlan.stops ?? []).map((stop) => stop.id).join('>');
   } catch {
     return null;
@@ -289,6 +289,7 @@ export async function generateIdeaDateSuggestionPackWithTelemetry(
     },
     prefTilt: options?.prefTilt,
     mode: options?.mode,
+    debug: isDevelopment,
   });
 
   // `unknown` means the resolver callback was never exercised in this refine cycle.
@@ -519,8 +520,8 @@ async function buildFallbackSuggestion(
       newIdeaDateProfile: parsedProfile.data,
     },
   ];
-  const previewPlan = applyIdeaDateOps(plan, patchOps);
-  const preview = await recomputeIdeaDateLive(previewPlan);
+  const previewPlan = applyIdeaDateOps(plan, patchOps, { debug: isDevelopment });
+  const preview = await recomputeIdeaDateLive(previewPlan, { debug: isDevelopment });
   const delta = preview.computed.journeyScore - computed.journeyScore;
   if (delta <= 0) return null;
 
@@ -657,7 +658,7 @@ export function useIdeaDateLens(planId: string) {
         if (!(options?.preserveUndoSnapshot ?? false)) {
           clearLastAppliedSnapshot();
         }
-        const live = await recomputeIdeaDateLive(nextPlan);
+        const live = await recomputeIdeaDateLive(nextPlan, { debug: isDevelopment });
         const nextPrefTilt = readPlanPrefTiltMeta(live.plan);
         const nextMode = readPlanModeMeta(live.plan);
         setPlan(planId, live.plan);
@@ -725,7 +726,7 @@ export function useIdeaDateLens(planId: string) {
         return;
       }
       try {
-        const live = await recomputeIdeaDateLive(stored);
+        const live = await recomputeIdeaDateLive(stored, { debug: isDevelopment });
         if (cancelled) return;
         const seedTelemetry = readSeedResolverTelemetry(live.plan);
         const nextPrefTilt = readPlanPrefTiltMeta(live.plan);
@@ -910,7 +911,7 @@ export function useIdeaDateLens(planId: string) {
     setLastResolverCandidateCount(0);
     setLastResolverError(null);
     try {
-      const live = await recomputeIdeaDateLive(sourcePlan);
+      const live = await recomputeIdeaDateLive(sourcePlan, { debug: isDevelopment });
       const planPrefTilt = readPlanPrefTiltMeta(live.plan);
       const planMode = readPlanModeMeta(live.plan);
       const { pack, telemetry } = await generateIdeaDateSuggestionPackWithTelemetry(live.plan, {
@@ -998,8 +999,8 @@ export function useIdeaDateLens(planId: string) {
       if (!suggestion) return;
       setIsBusy(true);
       try {
-        const nextPlan = applyIdeaDateOps(baselinePlan, suggestion.patchOps);
-        const live = await recomputeIdeaDateLive(nextPlan);
+        const nextPlan = applyIdeaDateOps(baselinePlan, suggestion.patchOps, { debug: isDevelopment });
+        const live = await recomputeIdeaDateLive(nextPlan, { debug: isDevelopment });
         setPreviewPlan(live.plan);
         setPreviewSuggestionId(suggestion.id);
         setLivePlan(live.plan);
@@ -1036,7 +1037,7 @@ export function useIdeaDateLens(planId: string) {
       });
       previousPlanRef.current = clonePlanSnapshot(baselinePlan);
       setCanUndoLastApply(true);
-      const nextPlan = applyIdeaDateOps(baselinePlan, suggestion.patchOps);
+      const nextPlan = applyIdeaDateOps(baselinePlan, suggestion.patchOps, { debug: isDevelopment });
       try {
         await recomputeCommittedPlan(nextPlan, { preserveUndoSnapshot: true });
         publishAppliedNotice(nextNotice);

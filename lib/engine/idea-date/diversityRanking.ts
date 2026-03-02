@@ -1,4 +1,4 @@
-import type { Stop } from '@/app/plan-engine/types';
+import type { Stop } from '@/lib/core/planTypes';
 
 export type DiversityPolicy = {
   diversity: {
@@ -90,4 +90,5 @@ export function computeDiversityPenalty(input: {
 export function areArcDeltasNearEqual(a: number, b: number, nearEqualArcDelta: number): boolean {
   return Math.abs(a - b) <= nearEqualArcDelta;
 }
+
 

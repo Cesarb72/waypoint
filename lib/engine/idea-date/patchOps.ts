@@ -1,4 +1,4 @@
-import type { Plan, Stop } from '@/app/plan-engine/types';
+import type { Plan, Stop } from '@/lib/core/planTypes';
 import type { IdeaDatePatchOp } from './types';
 
 function moveStop(stops: Stop[], stopId: string, toIndex: number): Stop[] {
@@ -86,7 +86,12 @@ export function normalizeRolesByIndex(plan: Plan): Plan {
   };
 }
 
-export function applyIdeaDatePatchOps(plan: Plan, ops: IdeaDatePatchOp[]): Plan {
+export function applyIdeaDatePatchOps(
+  plan: Plan,
+  ops: IdeaDatePatchOp[],
+  options?: { debug?: boolean }
+): Plan {
+  const debug = options?.debug ?? true;
   const startingStops = [...(plan.stops ?? [])];
   const startStopCount = startingStops.length;
   const startDuplicatePlaceIds = collectDuplicateValues(startingStops.map((stop) => readStopPlaceId(stop)));
@@ -112,7 +117,7 @@ export function applyIdeaDatePatchOps(plan: Plan, ops: IdeaDatePatchOp[]): Plan 
     nextStops = normalized.stops ?? nextStops;
   }
 
-  if (process.env.NODE_ENV !== 'production') {
+  if (debug) {
     if (hasReplaceOp && nextStops.length !== startStopCount) {
       throw new Error(
         `Idea-Date patch invariant failed: replaceStop changed stop count (${startStopCount} -> ${nextStops.length}).`
@@ -143,3 +148,4 @@ export function applyIdeaDatePatchOps(plan: Plan, ops: IdeaDatePatchOp[]): Plan 
     stops: nextStops,
   };
 }
+

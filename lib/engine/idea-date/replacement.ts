@@ -1,4 +1,4 @@
-import type { PlaceLite, PlaceRef, Plan, Stop } from '@/app/plan-engine/types';
+import type { PlaceLite, PlaceRef, Plan, Stop } from '@/lib/core/planTypes';
 import {
   type IdeaDateRole,
   type IdeaDateVibeId,
@@ -48,7 +48,6 @@ const REORDER_REPAIR_MIN_ARC_IMPROVEMENT_DELTA = MIN_SIGNAL_EPS;
 export const MAX_REPLACEMENT_CANDIDATES_SEEN_PRIMARY = 60;
 export const MAX_REPLACEMENT_CANDIDATES_SEEN_REPAIR = 90;
 export const MAX_REORDER_REPAIR_EVALUATED = 12;
-const includeDevQueryDebug = process.env.NODE_ENV !== 'production';
 const ROLE_TYPE_HINTS: Record<IdeaDateRole, string[]> = {
   start: ['cafe', 'coffee_shop', 'restaurant', 'tea_house', 'bakery'],
   main: [
@@ -912,11 +911,13 @@ export async function generateReplacementSuggestionsWithStats(
     recomputeCandidatePlan?: RecomputeCandidatePlan;
     prefTilt?: Partial<IdeaDatePrefTilt>;
     mode?: IdeaDateMode;
+    debug?: boolean;
   }
 ): Promise<{
   suggestions: IdeaDateSuggestion[];
   refineStats: IdeaDateRefineStats;
 }> {
+  const includeDevQueryDebug = options?.debug ?? true;
   const refineStartedAt = nowMs();
   const timing = {
     resolverFetchMs: 0,
@@ -928,7 +929,8 @@ export async function generateReplacementSuggestionsWithStats(
   const searchPlacesNear = options?.searchPlacesNear ?? defaultSearchPlacesNear;
   const hasCustomRecomputeCandidatePlan = Boolean(options?.recomputeCandidatePlan);
   const recomputeCandidatePlan: RecomputeCandidatePlan =
-    options?.recomputeCandidatePlan ?? (async (candidatePlan) => recomputeIdeaDateLive(candidatePlan));
+    options?.recomputeCandidatePlan
+      ?? (async (candidatePlan) => recomputeIdeaDateLive(candidatePlan, { debug: includeDevQueryDebug }));
   const diversityPolicy = normalizeDiversityPolicy(
     options?.replacementRanking?.diversityPolicy ?? disabledDiversityPolicy()
   );
@@ -1126,7 +1128,7 @@ export async function generateReplacementSuggestionsWithStats(
           });
           let candidatePlan: Plan;
           try {
-            candidatePlan = applyIdeaDatePatchOps(plan, patchOps);
+            candidatePlan = applyIdeaDatePatchOps(plan, patchOps, { debug: includeDevQueryDebug });
           } catch {
             timing.candidatePrepMs += elapsedMs(candidatePrepStartedAt);
             incrementPassDiscardReason('invariant_violation');
@@ -1312,7 +1314,7 @@ export async function generateReplacementSuggestionsWithStats(
 
       let candidatePlan: Plan;
       try {
-        candidatePlan = applyIdeaDatePatchOps(plan, patchOps);
+        candidatePlan = applyIdeaDatePatchOps(plan, patchOps, { debug: includeDevQueryDebug });
       } catch {
         timing.candidatePrepMs += elapsedMs(candidatePrepStartedAt);
         incrementDiscardReason(refineStats, 'invariant_violation');
@@ -1532,8 +1534,10 @@ export async function generateReplacementSuggestions(
     recomputeCandidatePlan?: RecomputeCandidatePlan;
     prefTilt?: Partial<IdeaDatePrefTilt>;
     mode?: IdeaDateMode;
+    debug?: boolean;
   }
 ): Promise<IdeaDateSuggestion[]> {
   const { suggestions } = await generateReplacementSuggestionsWithStats(plan, computed, options);
   return suggestions;
 }
+
