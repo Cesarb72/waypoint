@@ -3454,8 +3454,8 @@ function persistDraft(nextDraft: PlanDraft) {
                 </div>
                 {shouldLogVerticalDebug ? (
                   <p className="text-[10px] text-slate-500">
-                    pack_mode: '{packMode}' | reason: '{experiencePackPreviewReason}' |
-                    flip_condition: 'distinctCompletedPlans &gt;= 3 AND cityKnown'
+                    pack_mode: &apos;{packMode}&apos; | reason: &apos;{experiencePackPreviewReason}&apos; |
+                    flip_condition: &apos;distinctCompletedPlans &gt;= 3 AND cityKnown&apos;
                   </p>
                 ) : null}
               </div>
@@ -5010,8 +5010,8 @@ function persistDraft(nextDraft: PlanDraft) {
                       )}
                       {shouldLogVerticalDebug ? (
                         <p className="text-[10px] text-slate-500">
-                          pack_mode: '{packMode}' | reason: '{experiencePackPreviewReason}' |
-                          flip_condition: 'distinctCompletedPlans &gt;= 3 AND cityKnown'
+                          pack_mode: &apos;{packMode}&apos; | reason: &apos;{experiencePackPreviewReason}&apos; |
+                          flip_condition: &apos;distinctCompletedPlans &gt;= 3 AND cityKnown&apos;
                         </p>
                       ) : null}
                     </>
