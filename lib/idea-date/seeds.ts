@@ -92,7 +92,7 @@ const SURPRISE_GOOGLE_LIMIT = 12;
 const SURPRISE_GOOGLE_MIN_CANDIDATES = 3;
 const SURPRISE_GOOGLE_MAX_CALLS = 7;
 const SURPRISE_DEFAULT_CENTER: LatLng = { lat: 37.7784, lng: -122.4231 };
-const debug = process.env.NEXT_PUBLIC_VERTICAL_DEBUG === '1';
+const debug = typeof process !== 'undefined' && process.env.NEXT_PUBLIC_VERTICAL_DEBUG === '1';
 
 const START_TYPE_HINTS = ['restaurant', 'cafe', 'coffee_shop', 'tea_house', 'bakery'] as const;
 const MAIN_TYPE_HINTS = ['art_gallery', 'museum', 'amusement_center', 'tourist_attraction'] as const;
